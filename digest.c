@@ -27,43 +27,25 @@ __m256i expand_mask(const uint32_t mask) {
 // -- end SO code
 
 // -- this code dervied from https://github.com/lemire/Code-used-on-Daniel-Lemire-s-blog/blob/master/2018/01/09/simdinterleave.c
-static inline uint64_t interleave_uint32_with_zeros(uint32_t input) {
-  uint64_t word = input;
-  word = (word ^ (word << 16)) & 0x0000ffff0000ffff;
-  word = (word ^ (word << 8)) & 0x00ff00ff00ff00ff;
-  word = (word ^ (word << 4)) & 0x0f0f0f0f0f0f0f0f;
-  word = (word ^ (word << 2)) & 0x3333333333333333;
-  word = (word ^ (word << 1)) & 0x5555555555555555;
-  return word;
-}
-
-static inline uint32_t deinterleave_lowuint32(uint64_t word) {
-  word &= 0x5555555555555555;
-  word = (word ^ (word >> 1)) & 0x3333333333333333;
-  word = (word ^ (word >> 2)) & 0x0f0f0f0f0f0f0f0f;
-  word = (word ^ (word >> 4)) & 0x00ff00ff00ff00ff;
-  word = (word ^ (word >> 8)) & 0x0000ffff0000ffff;
-  word = (word ^ (word >> 16)) & 0x00000000ffffffff;
-  return (uint32_t)word;
-}
 typedef struct {
   uint32_t lo;
   uint32_t hi;
 } uint32_2;
 
-uint64_t interleave_u32_u32(uint32_t lo, uint32_t hi) {
-  return interleave_uint32_with_zeros(lo) | (interleave_uint32_with_zeros(hi) << 1);
+uint64_t interleave(uint32_t lo, uint32_t  hi) {
+  return _pdep_u64(lo, 0x5555555555555555) |
+         _pdep_u64(hi, 0xaaaaaaaaaaaaaaaa);
 }
 
-uint32_2 deinterleave_u32_u32(uint64_t input) {
+uint32_2 deinterleave(uint64_t input) {
   uint32_2 ret;
-  ret.lo = deinterleave_lowuint32(input);
-  ret.hi = deinterleave_lowuint32(input >> 1);
+  ret.lo = _pext_u64(input, 0x5555555555555555);
+  ret.hi = _pext_u64(input, 0xaaaaaaaaaaaaaaaa);
   return ret;
 }
 // -- end lemire code
 
-void NOINLINE xform(const char x[32], char ret[40]) {
+void NOINLINE xform(const uint8_t x[32], uint8_t ret[40]) {
     uint64_t acc = 0;
     for (int i = 0; i < 32; i++) {
         if (x[i] == 0) {
@@ -109,12 +91,17 @@ void printhex(const uint8_t *x, int n) {
     printf("\n\n");
 }
 
+// each position gets 2 bits in the mask
+// 00 - not used
+// 01 - okay
+// 10 - zero
+// 11 - slash
+//
 void NOINLINE xform_simd(const uint8_t x[32], uint8_t ret[40]) {
     __m256i y = _mm256_loadu_si256((__m256i*) x);
     __m256i is_zero = _mm256_cmpeq_epi8(y, _mm256_set1_epi8(0));
     __m256i is_slash = _mm256_cmpeq_epi8(y, _mm256_set1_epi8('/'));
     __m256i is_zero_or_slash = _mm256_or_si256(is_zero, is_slash);
-    __m256i is_slash_or_ok = _mm256_andnot_si256(is_zero, is_slash);
     __m256i is_ok = _mm256_xor_si256(is_zero_or_slash, _mm256_set1_epi8(0xff));
 
     y = _mm256_blendv_epi8(y, _mm256_set1_epi8(0xfe), is_zero_or_slash);
@@ -123,8 +110,11 @@ void NOINLINE xform_simd(const uint8_t x[32], uint8_t ret[40]) {
     uint32_t mask_hi = _mm256_movemask_epi8(is_zero_or_slash);
     /*uint32_t mask_lo = _mm256_movemask_epi8(is_slash_or_ok);*/
     uint32_t mask_lo = _mm256_movemask_epi8(_mm256_or_si256(is_ok, is_slash));
-    uint32_t mask_ok = _mm256_movemask_epi8(is_ok);
-    uint64_t mask = interleave_u32_u32(mask_lo, mask_hi);
+    /*uint32_t mask_ok = _mm256_movemask_epi8(is_ok);*/
+    uint64_t mask = interleave(mask_lo, mask_hi);
+    /*if (mask != interleave_u32_u32(mask_lo, mask_hi)) {*/
+    /*    printf("ERROR\n");*/
+    /*}*/
 
     /*printf("mask_ok: ");*/
     /*printbits_32(mask_ok);*/
@@ -139,15 +129,16 @@ void NOINLINE xform_simd(const uint8_t x[32], uint8_t ret[40]) {
 }
 
 void NOINLINE xform_invert_simd(const uint8_t x[40], uint8_t ret[32]) {
-    uint32_t is_zero_mask;
-    uint32_t is_slash_mask;
-    memcpy(&is_zero_mask, x + 32 + 0, 4);
-    memcpy(&is_slash_mask, x + 32 + 4, 4);
-    __m256i is_zero = expand_mask(is_zero_mask);
-    __m256i is_slash = expand_mask(is_slash_mask);
+    uint64_t mask;
+    memcpy(&mask, ret + 32, 8);
+    uint32_2 masks = deinterleave(mask);
+    // TODO
+    __m256i is_zero_or_slash = expand_mask(masks.hi);
+    __m256i is_ok_or_slash = expand_mask(masks.lo);
+    /*__m256i is_slash = expand_mask(is_slash_mask);*/
     __m256i y = _mm256_loadu_si256((__m256i*) x);
-    y = _mm256_blendv_epi8(y, _mm256_set1_epi8(0), is_zero);
-    y = _mm256_blendv_epi8(y, _mm256_set1_epi8('/'), is_slash);
+    /*y = _mm256_blendv_epi8(y, _mm256_set1_epi8(0), is_zero);*/
+    /*y = _mm256_blendv_epi8(y, _mm256_set1_epi8('/'), is_slash);*/
     _mm256_storeu_si256((__m256i*) ret, y);
 }
 
@@ -207,6 +198,7 @@ int main() {
 
     xform(x, y);
     printhex(y, 40);
+    memset(y, 0, 40);
 
     xform_simd(x, y);
     printhex(y, 40);
@@ -222,7 +214,7 @@ int main() {
     /*printbits_32(1);*/
     /*printbits_32(0xff00ff00);*/
 
-    return 0;
+    /*return 0;*/
 
     Timespec start, stop;
 
@@ -249,7 +241,7 @@ int main() {
     acc = 0;
     clock_ns(&start);
     for (int i = 0; i < iters; i++) {
-        encode_hex(y, z);
+        encode_hex(y, (char*)z);
         acc += z[39];
     }
     clock_ns(&stop);
@@ -265,7 +257,7 @@ int main() {
     printf("invert  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
 }
 
-//  ls foo.c | entr -c bash -c 'clang -Wall -march=native -O2 foo.c &&  llvm-objdump --disassemble-symbols=xform,xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
+//  ls digest.c | entr -c bash -c 'clang -Wall -march=native -O2 digest.c &&  llvm-objdump --disassemble-symbols=xform,xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
 /*
  *00000000004011e0 <xformsimd>:
   4011e0: c5 fe 6f 07                  	vmovdqu	ymm0, ymmword ptr [rdi]
