@@ -92,6 +92,7 @@ void printhex(const uint8_t *x, int n) {
 }
 
 // each position gets 2 bits in the mask
+// HL - where H is the mask_hi bit and L is the mask_lo bit
 // 00 - not used
 // 01 - okay
 // 10 - zero
@@ -102,43 +103,33 @@ void NOINLINE xform_simd(const uint8_t x[32], uint8_t ret[40]) {
     __m256i is_zero = _mm256_cmpeq_epi8(y, _mm256_set1_epi8(0));
     __m256i is_slash = _mm256_cmpeq_epi8(y, _mm256_set1_epi8('/'));
     __m256i is_zero_or_slash = _mm256_or_si256(is_zero, is_slash);
-    __m256i is_ok = _mm256_xor_si256(is_zero_or_slash, _mm256_set1_epi8(0xff));
 
     y = _mm256_blendv_epi8(y, _mm256_set1_epi8(0xfe), is_zero_or_slash);
     _mm256_storeu_si256((__m256i*) ret, y);
 
-    uint32_t mask_hi = _mm256_movemask_epi8(is_zero_or_slash);
-    /*uint32_t mask_lo = _mm256_movemask_epi8(is_slash_or_ok);*/
-    uint32_t mask_lo = _mm256_movemask_epi8(_mm256_or_si256(is_ok, is_slash));
-    /*uint32_t mask_ok = _mm256_movemask_epi8(is_ok);*/
+    uint32_t mask_zero = _mm256_movemask_epi8(is_zero);
+    uint32_t mask_slash = _mm256_movemask_epi8(is_slash);
+    uint32_t mask_ok = ~(mask_zero | mask_slash);
+    uint32_t mask_hi = ~mask_ok;
+    uint32_t mask_lo = mask_ok | mask_slash;
     uint64_t mask = interleave(mask_lo, mask_hi);
-    /*if (mask != interleave_u32_u32(mask_lo, mask_hi)) {*/
-    /*    printf("ERROR\n");*/
-    /*}*/
-
-    /*printf("mask_ok: ");*/
-    /*printbits_32(mask_ok);*/
-    /*printf("mask_hi: ");*/
-    /*printbits_32(mask_hi);*/
-    /*printf("mask_lo: ");*/
-    /*printbits_32(mask_lo);*/
-    /*printf("mask   : ");*/
-    /*printbits_64(mask);*/
 
     memcpy(ret + 32, &mask, 8);
 }
 
 void NOINLINE xform_invert_simd(const uint8_t x[40], uint8_t ret[32]) {
     uint64_t mask;
-    memcpy(&mask, ret + 32, 8);
+    memcpy(&mask, x + 32, 8);
     uint32_2 masks = deinterleave(mask);
-    // TODO
-    __m256i is_zero_or_slash = expand_mask(masks.hi);
-    __m256i is_ok_or_slash = expand_mask(masks.lo);
-    /*__m256i is_slash = expand_mask(is_slash_mask);*/
+    uint32_t mask_slash = masks.hi & masks.lo;
+    uint32_t mask_zero = masks.hi & ~masks.lo;
+
+    __m256i is_slash = expand_mask(mask_slash);
+    __m256i is_zero = expand_mask(mask_zero);
+
     __m256i y = _mm256_loadu_si256((__m256i*) x);
-    /*y = _mm256_blendv_epi8(y, _mm256_set1_epi8(0), is_zero);*/
-    /*y = _mm256_blendv_epi8(y, _mm256_set1_epi8('/'), is_slash);*/
+    y = _mm256_blendv_epi8(y, _mm256_set1_epi8(0), is_zero);
+    y = _mm256_blendv_epi8(y, _mm256_set1_epi8('/'), is_slash);
     _mm256_storeu_si256((__m256i*) ret, y);
 }
 
@@ -203,6 +194,7 @@ int main() {
     xform_simd(x, y);
     printhex(y, 40);
 
+    memset(z, 0, 40);
     xform_invert_simd(y, z);
     printhex(z, 32);
 
@@ -251,7 +243,7 @@ int main() {
     clock_ns(&start);
     for (int i = 0; i < iters; i++) {
         xform_invert_simd(y, z);
-        acc += z[10];
+        acc += z[9];
     }
     clock_ns(&stop);
     printf("invert  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
