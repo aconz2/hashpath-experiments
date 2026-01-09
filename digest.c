@@ -109,9 +109,8 @@ void NOINLINE xform_simd(const uint8_t x[32], uint8_t ret[40]) {
 
     uint32_t mask_zero = _mm256_movemask_epi8(is_zero);
     uint32_t mask_slash = _mm256_movemask_epi8(is_slash);
-    uint32_t mask_ok = ~(mask_zero | mask_slash);
-    uint32_t mask_hi = ~mask_ok;
-    uint32_t mask_lo = mask_ok | mask_slash;
+    uint32_t mask_hi = mask_zero | mask_slash;
+    uint32_t mask_lo = ~mask_zero;
     uint64_t mask = interleave(mask_lo, mask_hi);
 
     memcpy(ret + 32, &mask, 8);
@@ -123,6 +122,8 @@ void NOINLINE xform_invert_simd(const uint8_t x[40], uint8_t ret[32]) {
     uint32_2 masks = deinterleave(mask);
     uint32_t mask_slash = masks.hi & masks.lo;
     uint32_t mask_zero = masks.hi & ~masks.lo;
+
+    // TODO you can check the validity by checking that ~masks.hi & ~masks.lo is 0
 
     __m256i is_slash = expand_mask(mask_slash);
     __m256i is_zero = expand_mask(mask_zero);
@@ -171,13 +172,81 @@ void NOINLINE encode_hex(const uint8_t x[32], char ret[65]) {
   ret[64] = 0;
 }
 
+inline static __m256i unhexBitManip(const __m256i value) {
+    __m256i and15 = _mm256_and_si256(value, _mm256_set1_epi16(15));
+
+#ifndef NO_MADDUBS
+    __m256i sr6 = _mm256_srai_epi16(value, 6);
+    __m256i mul = _mm256_maddubs_epi16(sr6, _mm256_set1_epi16(9)); // this has a latency of 5
+#else
+    // ... while this I think has a latency of 4, but worse throughput(?).
+    // (x >> 6) * 9 is x * 8 + x:
+    // ((x >> 6) << 3) + (x >> 6)
+    // We need & 0b11 to emulate 8-bit operations (narrowest shift is 16b) -- or a left shift
+    // (((x >> 6) & 0b11) << 3) + ((x >> 6) & 0b11)
+    // or
+    // tmp = (x >> 6) & 0b11
+    // tmp << 3 + tmp
+    // there's no carry due to the mask+shift combo, so + is |
+    // tmp << 3 | tmp
+    __m256i sr6_lo2 = _mm256_and_si256(_mm256_srli_epi16(value, 6), _mm256_set1_epi16(0b11));
+    __m256i sr6_lo2_sl3 = _mm256_slli_epi16(sr6_lo2, 3);
+    __m256i mul = _mm256_or_si256(sr6_lo2_sl3, sr6_lo2);
+#endif
+
+    __m256i add = _mm256_add_epi16(mul, and15);
+    return add;
+}
+
+inline static __m256i nib2byte(__m256i a1, __m256i b1, __m256i a2, __m256i b2) {
+    __m256i a4_1 = _mm256_slli_epi16(a1, 4);
+    __m256i a4_2 = _mm256_slli_epi16(a2, 4);
+    __m256i a4orb_1 = _mm256_or_si256(a4_1, b1);
+    __m256i a4orb_2 = _mm256_or_si256(a4_2, b2);
+    __m256i pck1 = _mm256_packus_epi16(a4orb_1, a4orb_2); // lo1 lo2 hi1 hi2
+    __m256i pck64 = _mm256_permute4x64_epi64(pck1, 0b11011000); // 0213
+    return pck64;
+}
+
+void NOINLINE decode_hex(uint8_t* __restrict__ src, const uint8_t* __restrict__ dest) {
+    const __m256i A_MASK = _mm256_setr_epi8(
+    0, -1, 2, -1, 4, -1, 6, -1, 8, -1, 10, -1, 12, -1, 14, -1,
+    0, -1, 2, -1, 4, -1, 6, -1, 8, -1, 10, -1, 12, -1, 14, -1);
+    const __m256i B_MASK = _mm256_setr_epi8(
+    1, -1, 3, -1, 5, -1, 7, -1, 9, -1, 11, -1, 13, -1, 15, -1,
+    1, -1, 3, -1, 5, -1, 7, -1, 9, -1, 11, -1, 13, -1, 15, -1);
+
+    const __m256i* val3 = (__m256i*)src;
+    __m256i* dec256 = (__m256i*)dest;
+
+    __m256i av1 = _mm256_loadu_si256(val3 + 0); // 32 nibbles, 16 bytes
+    __m256i av2 = _mm256_loadu_si256(val3 + 1);
+                                                // Separate high and low nibbles and extend into 16-bit elements
+    __m256i a1 = _mm256_shuffle_epi8(av1, A_MASK);
+    __m256i b1 = _mm256_shuffle_epi8(av1, B_MASK);
+    __m256i a2 = _mm256_shuffle_epi8(av2, A_MASK);
+    __m256i b2 = _mm256_shuffle_epi8(av2, B_MASK);
+
+    // Convert ASCII values to nibbles
+    a1 = unhexBitManip(a1);
+    a2 = unhexBitManip(a2);
+    b1 = unhexBitManip(b1);
+    b2 = unhexBitManip(b2);
+
+    // Nibbles to bytes
+    __m256i bytes = nib2byte(a1, b1, a2, b2);
+
+    _mm256_storeu_si256(dec256, bytes);
+
+}
+
 // -- end fast-hex code
 
-int main() {
-    uint8_t x[32];
+int main(int argc) {
+    uint8_t x[32], xx[32];
     memset(x, 1, 32);
     uint8_t y[40];
-    uint8_t z[65];
+    char z[65];
 
 
     x[0] = 0;
@@ -201,7 +270,11 @@ int main() {
     uint8_t test[32];
     for (int i = 0; i < 32; i++) {test[i] = i;}
     encode_hex(test, z);
-    printf("test: %s\n", z);
+    printf("hextest: %s\n", z);
+    memset(test, 0, 32);
+    decode_hex(z, test);
+    for (int i = 0; i < 32; i++) {printf("%d ", test[i]);}
+    printf("\n");
 
     /*printbits_32(1);*/
     /*printbits_32(0xff00ff00);*/
@@ -233,7 +306,16 @@ int main() {
     acc = 0;
     clock_ns(&start);
     for (int i = 0; i < iters; i++) {
-        encode_hex(y, (char*)z);
+        xform_invert_simd(y, xx);
+        acc += xx[9];
+    }
+    clock_ns(&stop);
+    printf("invert  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+
+    acc = 0;
+    clock_ns(&start);
+    for (int i = 0; i < iters; i++) {
+        encode_hex(x, z);
         acc += z[39];
     }
     clock_ns(&stop);
@@ -242,39 +324,70 @@ int main() {
     acc = 0;
     clock_ns(&start);
     for (int i = 0; i < iters; i++) {
-        xform_invert_simd(y, z);
-        acc += z[9];
+        z[i & 0b11111] = 'a';  // optimizer was defeating us otherwise
+        decode_hex(z, y);
+        acc += y[3];
     }
     clock_ns(&stop);
-    printf("invert  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+    printf("hexdec  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
 }
 
 //  ls digest.c | entr -c bash -c 'clang -Wall -march=native -O2 digest.c &&  llvm-objdump --disassemble-symbols=xform,xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
 /*
- *00000000004011e0 <xformsimd>:
-  4011e0: c5 fe 6f 07                  	vmovdqu	ymm0, ymmword ptr [rdi]
-  4011e4: c5 f1 ef c9                  	vpxor	xmm1, xmm1, xmm1
-  4011e8: c5 fd 74 c9                  	vpcmpeqb	ymm1, ymm0, ymm1
-  4011ec: c5 fd 74 15 2c 0e 00 00      	vpcmpeqb	ymm2, ymm0, ymmword ptr [rip + 0xe2c] # 0x402020 <__dso_handle+0x18>
-  4011f4: c5 f5 eb da                  	vpor	ymm3, ymm1, ymm2
-  4011f8: c4 e3 7d 4c 05 3e 0e 00 00 30	vpblendvb	ymm0, ymm0, ymmword ptr [rip + 0xe3e], ymm3 # 0x402040 <__dso_handle+0x38>
-  401202: c5 fd d7 c1                  	vpmovmskb	eax, ymm1
-  401206: c5 fd d7 ca                  	vpmovmskb	ecx, ymm2
-  40120a: c5 fe 7f 06                  	vmovdqu	ymmword ptr [rsi], ymm0
-  40120e: 89 46 20                     	mov	dword ptr [rsi + 0x20], eax
-  401211: 89 4e 24                     	mov	dword ptr [rsi + 0x24], ecx
-  401214: c5 f8 77                     	vzeroupper
-  401217: c3                           	ret
-  401218: 0f 1f 84 00 00 00 00 00      	nop	dword ptr [rax + rax]
+0000000000401400 <xform_simd>:
+  401400: c5 fe 6f 07                  	vmovdqu	ymm0, ymmword ptr [rdi]
+  401404: c5 f1 ef c9                  	vpxor	xmm1, xmm1, xmm1
+  401408: c5 fd 74 c9                  	vpcmpeqb	ymm1, ymm0, ymm1
+  40140c: c5 fd 74 15 4c 0c 00 00      	vpcmpeqb	ymm2, ymm0, ymmword ptr [rip + 0xc4c] # 0x402060 <__dso_handle+0x58>
+  401414: c5 f5 eb da                  	vpor	ymm3, ymm1, ymm2
+  401418: c4 e3 7d 4c 05 5e 0c 00 00 30	vpblendvb	ymm0, ymm0, ymmword ptr [rip + 0xc5e], ymm3 # 0x402080 <__dso_handle+0x78>
+  401422: c5 fe 7f 06                  	vmovdqu	ymmword ptr [rsi], ymm0
+  401426: c5 fd d7 c1                  	vpmovmskb	eax, ymm1
+  40142a: c5 fd d7 ca                  	vpmovmskb	ecx, ymm2
+  40142e: c5 fd d7 d3                  	vpmovmskb	edx, ymm3
+  401432: f7 d0                        	not	eax
+  401434: 09 c8                        	or	eax, ecx
+  401436: 48 b9 55 55 55 55 55 55 55 55	movabs	rcx, 0x5555555555555555
+  401440: c4 e2 fb f5 c1               	pdep	rax, rax, rcx
+  401445: 48 b9 aa aa aa aa aa aa aa aa	movabs	rcx, -0x5555555555555556
+  40144f: c4 e2 eb f5 c9               	pdep	rcx, rdx, rcx
+  401454: 48 09 c1                     	or	rcx, rax
+  401457: 48 89 4e 20                  	mov	qword ptr [rsi + 0x20], rcx
+  40145b: c5 f8 77                     	vzeroupper
+  40145e: c3                           	ret
+  40145f: 90                           	nop
 
-output:
+0000000000401460 <xform_invert_simd>:
+  401460: 48 8b 47 20                  	mov	rax, qword ptr [rdi + 0x20]
+  401464: 48 b9 55 55 55 55 55 55 55 55	movabs	rcx, 0x5555555555555555
+  40146e: c4 e2 fa f5 c9               	pext	rcx, rax, rcx
+  401473: 48 ba aa aa aa aa aa aa aa aa	movabs	rdx, -0x5555555555555556
+  40147d: c4 e2 fa f5 c2               	pext	rax, rax, rdx
+  401482: c4 e2 70 f2 d0               	andn	edx, ecx, eax
+  401487: 21 c8                        	and	eax, ecx
+  401489: c5 f9 6e c0                  	vmovd	xmm0, eax
+  40148d: c4 e3 fd 00 c0 44            	vpermq	ymm0, ymm0, 0x44        # ymm0 = ymm0[0,1,0,1]
+  401493: c5 fd 6f 0d 85 0b 00 00      	vmovdqa	ymm1, ymmword ptr [rip + 0xb85] # 0x402020 <__dso_handle+0x18>
+  40149b: c4 e2 7d 00 c1               	vpshufb	ymm0, ymm0, ymm1
+  4014a0: c4 e2 7d 59 15 57 0c 00 00   	vpbroadcastq	ymm2, qword ptr [rip + 0xc57] # 0x402100 <__dso_handle+0xf8>
+  4014a9: c5 fd eb c2                  	vpor	ymm0, ymm0, ymm2
+  4014ad: c5 e5 76 db                  	vpcmpeqd	ymm3, ymm3, ymm3
+  4014b1: c5 f9 6e e2                  	vmovd	xmm4, edx
+  4014b5: c4 e3 fd 00 e4 44            	vpermq	ymm4, ymm4, 0x44        # ymm4 = ymm4[0,1,0,1]
+  4014bb: c4 e2 5d 00 c9               	vpshufb	ymm1, ymm4, ymm1
+  4014c0: c5 f5 eb ca                  	vpor	ymm1, ymm1, ymm2
+  4014c4: c5 f5 74 cb                  	vpcmpeqb	ymm1, ymm1, ymm3
+  4014c8: c5 f5 df 0f                  	vpandn	ymm1, ymm1, ymmword ptr [rdi]
+  4014cc: c5 fd 74 c3                  	vpcmpeqb	ymm0, ymm0, ymm3
+  4014d0: c4 e3 75 4c 05 86 0b 00 00 00	vpblendvb	ymm0, ymm1, ymmword ptr [rip + 0xb86], ymm0 # 0x402060 <__dso_handle+0x58>
+  4014da: c5 fe 7f 06                  	vmovdqu	ymmword ptr [rsi], ymm0
+  4014de: c5 f8 77                     	vzeroupper
+  4014e1: c3                           	ret
+  4014e2: 66 66 66 66 66 2e 0f 1f 84 00 00 00 00 00    	nop	word ptr cs:[rax + rax]
 
-00 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 2f
-
-fe 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 fe 01 00 00 00 00 00 00 80
-
-fe 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 fe 01 00 00 00 00 00 00 80
-
-reg  acc=ffffffffb3b4c000 elapsed=268857426 per_iter=26.89
-simd acc=ffffffffb3b4c000 elapsed=20204660 per_iter=2.02
+reg  acc=7ef53880 elapsed=290780392 per_iter=29.08
+simd acc=7ef53880 elapsed=29865673 per_iter=2.99
+invert  acc=989680 elapsed=31452898 per_iter=3.15
+hex  acc=1d34ce80 elapsed=28834164 per_iter=2.88
+hexdec  acc=6553ed01 elapsed=113337212 per_iter=11.33
 */
