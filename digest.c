@@ -336,26 +336,24 @@ int main(int argc) {
 /*
 0000000000401400 <xform_simd>:
   401400: c5 fe 6f 07                  	vmovdqu	ymm0, ymmword ptr [rdi]
-  401404: c5 f1 ef c9                  	vpxor	xmm1, xmm1, xmm1
-  401408: c5 fd 74 c9                  	vpcmpeqb	ymm1, ymm0, ymm1
-  40140c: c5 fd 74 15 4c 0c 00 00      	vpcmpeqb	ymm2, ymm0, ymmword ptr [rip + 0xc4c] # 0x402060 <__dso_handle+0x58>
-  401414: c5 f5 eb da                  	vpor	ymm3, ymm1, ymm2
-  401418: c4 e3 7d 4c 05 5e 0c 00 00 30	vpblendvb	ymm0, ymm0, ymmword ptr [rip + 0xc5e], ymm3 # 0x402080 <__dso_handle+0x78>
+  401404: c5 fd 74 0d 54 1c 00 00      	vpcmpeqb	ymm1, ymm0, ymmword ptr [rip + 0x1c54] # 0x403060 <__dso_handle+0x58>
+  40140c: c5 e9 ef d2                  	vpxor	xmm2, xmm2, xmm2
+  401410: c5 fd 74 d2                  	vpcmpeqb	ymm2, ymm0, ymm2
+  401414: c5 ed eb c9                  	vpor	ymm1, ymm2, ymm1
+  401418: c4 e3 7d 4c 05 5e 1c 00 00 10	vpblendvb	ymm0, ymm0, ymmword ptr [rip + 0x1c5e], ymm1 # 0x403080 <__dso_handle+0x78>
   401422: c5 fe 7f 06                  	vmovdqu	ymmword ptr [rsi], ymm0
-  401426: c5 fd d7 c1                  	vpmovmskb	eax, ymm1
-  40142a: c5 fd d7 ca                  	vpmovmskb	ecx, ymm2
-  40142e: c5 fd d7 d3                  	vpmovmskb	edx, ymm3
-  401432: f7 d0                        	not	eax
-  401434: 09 c8                        	or	eax, ecx
-  401436: 48 b9 55 55 55 55 55 55 55 55	movabs	rcx, 0x5555555555555555
-  401440: c4 e2 fb f5 c1               	pdep	rax, rax, rcx
-  401445: 48 b9 aa aa aa aa aa aa aa aa	movabs	rcx, -0x5555555555555556
-  40144f: c4 e2 eb f5 c9               	pdep	rcx, rdx, rcx
-  401454: 48 09 c1                     	or	rcx, rax
-  401457: 48 89 4e 20                  	mov	qword ptr [rsi + 0x20], rcx
-  40145b: c5 f8 77                     	vzeroupper
-  40145e: c3                           	ret
-  40145f: 90                           	nop
+  401426: c5 fd d7 c2                  	vpmovmskb	eax, ymm2
+  40142a: c5 fd d7 c9                  	vpmovmskb	ecx, ymm1
+  40142e: f7 d0                        	not	eax
+  401430: 48 ba 55 55 55 55 55 55 55 55	movabs	rdx, 0x5555555555555555
+  40143a: c4 e2 fb f5 c2               	pdep	rax, rax, rdx
+  40143f: 48 ba aa aa aa aa aa aa aa aa	movabs	rdx, -0x5555555555555556
+  401449: c4 e2 f3 f5 ca               	pdep	rcx, rcx, rdx
+  40144e: 48 09 c1                     	or	rcx, rax
+  401451: 48 89 4e 20                  	mov	qword ptr [rsi + 0x20], rcx
+  401455: c5 f8 77                     	vzeroupper
+  401458: c3                           	ret
+  401459: 0f 1f 80 00 00 00 00         	nop	dword ptr [rax]
 
 0000000000401460 <xform_invert_simd>:
   401460: 48 8b 47 20                  	mov	rax, qword ptr [rdi + 0x20]
@@ -367,9 +365,9 @@ int main(int argc) {
   401487: 21 c8                        	and	eax, ecx
   401489: c5 f9 6e c0                  	vmovd	xmm0, eax
   40148d: c4 e3 fd 00 c0 44            	vpermq	ymm0, ymm0, 0x44        # ymm0 = ymm0[0,1,0,1]
-  401493: c5 fd 6f 0d 85 0b 00 00      	vmovdqa	ymm1, ymmword ptr [rip + 0xb85] # 0x402020 <__dso_handle+0x18>
+  401493: c5 fd 6f 0d 85 1b 00 00      	vmovdqa	ymm1, ymmword ptr [rip + 0x1b85] # 0x403020 <__dso_handle+0x18>
   40149b: c4 e2 7d 00 c1               	vpshufb	ymm0, ymm0, ymm1
-  4014a0: c4 e2 7d 59 15 57 0c 00 00   	vpbroadcastq	ymm2, qword ptr [rip + 0xc57] # 0x402100 <__dso_handle+0xf8>
+  4014a0: c4 e2 7d 59 15 97 1c 00 00   	vpbroadcastq	ymm2, qword ptr [rip + 0x1c97] # 0x403140 <__dso_handle+0x138>
   4014a9: c5 fd eb c2                  	vpor	ymm0, ymm0, ymm2
   4014ad: c5 e5 76 db                  	vpcmpeqd	ymm3, ymm3, ymm3
   4014b1: c5 f9 6e e2                  	vmovd	xmm4, edx
@@ -379,12 +377,10 @@ int main(int argc) {
   4014c4: c5 f5 74 cb                  	vpcmpeqb	ymm1, ymm1, ymm3
   4014c8: c5 f5 df 0f                  	vpandn	ymm1, ymm1, ymmword ptr [rdi]
   4014cc: c5 fd 74 c3                  	vpcmpeqb	ymm0, ymm0, ymm3
-  4014d0: c4 e3 75 4c 05 86 0b 00 00 00	vpblendvb	ymm0, ymm1, ymmword ptr [rip + 0xb86], ymm0 # 0x402060 <__dso_handle+0x58>
+  4014d0: c4 e3 75 4c 05 86 1b 00 00 00	vpblendvb	ymm0, ymm1, ymmword ptr [rip + 0x1b86], ymm0 # 0x403060 <__dso_handle+0x58>
   4014da: c5 fe 7f 06                  	vmovdqu	ymmword ptr [rsi], ymm0
   4014de: c5 f8 77                     	vzeroupper
   4014e1: c3                           	ret
-  4014e2: 66 66 66 66 66 2e 0f 1f 84 00 00 00 00 00    	nop	word ptr cs:[rax + rax]
-
 reg  acc=7ef53880 elapsed=290780392 per_iter=29.08
 simd acc=7ef53880 elapsed=29865673 per_iter=2.99
 invert  acc=989680 elapsed=31452898 per_iter=3.15
