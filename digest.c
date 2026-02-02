@@ -354,8 +354,7 @@ int main(int argc, char **argv) {
     printf("base64_to_binary  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
 }
 
-//  ls digest.c | entr -c bash -c 'clang -Wall -march=native -O2 digest.c &&  llvm-objdump --disassemble-symbols=xform,xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
-//  ls digest.c | entr -c bash -c 'clang -Wall -march=native -O2 -lstdc++ simdutf.o digest.c &&  llvm-objdump --disassemble-symbols=xform,xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
+//  ls digest.c | entr -c bash -c './build.sh &&  llvm-objdump --disassemble-symbols=xform,xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
 /*
 0000000000401400 <xform_simd>:
   401400: c5 fe 6f 07                  	vmovdqu	ymm0, ymmword ptr [rdi]
@@ -404,9 +403,12 @@ int main(int argc, char **argv) {
   4014da: c5 fe 7f 06                  	vmovdqu	ymmword ptr [rsi], ymm0
   4014de: c5 f8 77                     	vzeroupper
   4014e1: c3                           	ret
-reg  acc=7ef53880 elapsed=290780392 per_iter=29.08
-simd acc=7ef53880 elapsed=29865673 per_iter=2.99
-invert  acc=989680 elapsed=31452898 per_iter=3.15
-hex  acc=1d34ce80 elapsed=28834164 per_iter=2.88
-hexdec  acc=6553ed01 elapsed=113337212 per_iter=11.33
+
+reg  acc=ffffffffe65eb880 elapsed=254017475 per_iter=25.40
+simd acc=ffffffffe65eb880 elapsed=21736239 per_iter=2.17
+invert  acc=989680 elapsed=22620208 per_iter=2.26
+hex  acc=1d34ce80 elapsed=21306444 per_iter=2.13
+hexdec  acc=ffffffffccbd7301 elapsed=155027268 per_iter=15.50
+binary_to_base64  acc=1a39de00 elapsed=104796149 per_iter=10.48
+base64_to_binary  acc=0 elapsed=369421927 per_iter=36.94
 */
