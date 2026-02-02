@@ -4,6 +4,9 @@
 #include <immintrin.h>
 #include <stdio.h>
 #include <time.h>
+
+#include "simdutf_c.h"
+
 #define NOINLINE __attribute__((noinline))
 
 typedef struct timespec Timespec;
@@ -45,7 +48,7 @@ uint32_2 deinterleave(uint64_t input) {
 }
 // -- end lemire code
 
-void NOINLINE xform(const uint8_t x[32], uint8_t ret[40]) {
+void NOINLINE xform(const char x[32], char ret[40]) {
     uint64_t acc = 0;
     for (int i = 0; i < 32; i++) {
         if (x[i] == 0) {
@@ -84,7 +87,7 @@ void printbits_64(uint64_t x) {
     printf("\n");
 }
 
-void printhex(const uint8_t *x, int n) {
+void printhex(const char *x, int n) {
     for (int i = 0; i < n; i++) {
         printf("%02x ", (uint8_t)x[i]);
     }
@@ -98,7 +101,7 @@ void printhex(const uint8_t *x, int n) {
 // 10 - zero
 // 11 - slash
 //
-void NOINLINE xform_simd(const uint8_t x[32], uint8_t ret[40]) {
+void NOINLINE xform_simd(const char x[32], char ret[40]) {
     __m256i y = _mm256_loadu_si256((__m256i*) x);
     __m256i is_zero = _mm256_cmpeq_epi8(y, _mm256_set1_epi8(0));
     __m256i is_slash = _mm256_cmpeq_epi8(y, _mm256_set1_epi8('/'));
@@ -116,7 +119,7 @@ void NOINLINE xform_simd(const uint8_t x[32], uint8_t ret[40]) {
     memcpy(ret + 32, &mask, 8);
 }
 
-void NOINLINE xform_invert_simd(const uint8_t x[40], uint8_t ret[32]) {
+void NOINLINE xform_invert_simd(const char x[40], char ret[32]) {
     uint64_t mask;
     memcpy(&mask, x + 32, 8);
     uint32_2 masks = deinterleave(mask);
@@ -159,7 +162,7 @@ inline static __m256i byte2nib(__m128i val) {
 }
 
 // adapted from encodeHexVec
-void NOINLINE encode_hex(const uint8_t x[32], char ret[65]) {
+void NOINLINE encode_hex(const char x[32], char ret[65]) {
     const __m128i* input128 = (const __m128i*)x;
     __m256i* output256 = (__m256i*)ret;
 
@@ -242,10 +245,10 @@ void NOINLINE decode_hex(uint8_t* __restrict__ src, const uint8_t* __restrict__ 
 
 // -- end fast-hex code
 
-int main(int argc) {
-    uint8_t x[32], xx[32];
+int main(int argc, char **argv) {
+    char x[32], xx[32];
     memset(x, 1, 32);
-    uint8_t y[40];
+    char y[40];
     char z[65];
 
 
@@ -267,14 +270,14 @@ int main(int argc) {
     xform_invert_simd(y, z);
     printhex(z, 32);
 
-    uint8_t test[32];
+    char test[32];
     for (int i = 0; i < 32; i++) {test[i] = i;}
     encode_hex(test, z);
     printf("hextest: %s\n", z);
     memset(test, 0, 32);
-    decode_hex(z, test);
+    decode_hex((uint8_t*)z, (uint8_t*)test);
     for (int i = 0; i < 32; i++) {printf("%d ", test[i]);}
-    printf("\n");
+    printf("\n\n");
 
     /*printbits_32(1);*/
     /*printbits_32(0xff00ff00);*/
@@ -325,14 +328,34 @@ int main(int argc) {
     clock_ns(&start);
     for (int i = 0; i < iters; i++) {
         z[i & 0b11111] = 'a';  // optimizer was defeating us otherwise
-        decode_hex(z, y);
+        decode_hex((uint8_t*)z, (uint8_t*)y);
         acc += y[3];
     }
     clock_ns(&stop);
     printf("hexdec  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+
+    acc = 0;
+    size_t l; // this will be 44
+    clock_ns(&start);
+    for (int i = 0; i < iters; i++) {
+        l = simdutf_binary_to_base64(x, 32, z, SIMDUTF_BASE64_DEFAULT);
+        acc += l;
+    }
+    clock_ns(&stop);
+    printf("binary_to_base64  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+
+    acc = 0;
+    clock_ns(&start);
+    for (int i = 0; i < iters; i++) {
+        simdutf_result r = simdutf_base64_to_binary(z, l, xx, SIMDUTF_BASE64_DEFAULT, SIMDUTF_LAST_CHUNK_LOOSE);
+        acc += r.error;
+    }
+    clock_ns(&stop);
+    printf("base64_to_binary  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
 }
 
 //  ls digest.c | entr -c bash -c 'clang -Wall -march=native -O2 digest.c &&  llvm-objdump --disassemble-symbols=xform,xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
+//  ls digest.c | entr -c bash -c 'clang -Wall -march=native -O2 -lstdc++ simdutf.o digest.c &&  llvm-objdump --disassemble-symbols=xform,xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
 /*
 0000000000401400 <xform_simd>:
   401400: c5 fe 6f 07                  	vmovdqu	ymm0, ymmword ptr [rdi]
