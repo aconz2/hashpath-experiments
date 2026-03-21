@@ -4,6 +4,7 @@
 #include <immintrin.h>
 #include <stdio.h>
 #include <time.h>
+#include <assert.h>
 
 #include "simdutf_c.h"
 
@@ -15,6 +16,35 @@ static void clock_ns(Timespec* t) {
 }
 static uint64_t elapsed_ns(Timespec start, Timespec stop) {
   return (uint64_t)(stop.tv_sec - start.tv_sec) * 1000000000LL + (uint64_t)(stop.tv_nsec - start.tv_nsec);
+}
+
+void printbits_32(uint32_t x) {
+    for (int i = 0; i < 32; i++) {
+        if ((x >> (31 - i)) & 1) {
+            printf("1");
+        } else {
+            printf("0");
+        }
+    }
+    printf("\n");
+}
+
+void printbits_64(uint64_t x) {
+    for (int i = 0; i < 64; i++) {
+        if ((x >> (64 - i)) & 1) {
+            printf("1");
+        } else {
+            printf("0");
+        }
+    }
+    printf("\n");
+}
+
+void printhex(const char *x, int n) {
+    for (int i = 0; i < n; i++) {
+        printf("%02x ", (uint8_t)x[i]);
+    }
+    printf("\n");
 }
 
 // -- this code derived from  https://stackoverflow.com/questions/21622212/how-to-perform-the-inverse-of-mm256-movemask-epi8-vpmovmskb
@@ -48,7 +78,44 @@ uint32_2 deinterleave(uint64_t input) {
 }
 // -- end lemire code
 
-void NOINLINE xform(const char x[32], char ret[40]) {
+// we can either store the 2 bits in little or big endian
+void NOINLINE encode_40_be(const char x[32], char ret[40]) {
+    uint64_t acc = 0;
+    for (int i = 0; i < 32; i++) {
+        acc <<= 2;
+        if (x[i] == 0) {
+            ret[i] = 0xfe;
+            acc |= 2;
+        } else if (x[i] == '/') {
+            ret[i] = 0xfe;
+            acc |= 3;
+        } else {
+            ret[i] = x[i];
+            acc |= 1;
+        }
+    }
+    memcpy(ret + 32, &acc, 8);
+}
+
+void NOINLINE decode_40_be(const char x[40], char ret[32]) {
+    uint64_t acc;
+    memcpy(&acc, x + 32, 8);
+    for (int i = 31; i >= 0; i--) {
+        int b = acc & 0b11;
+        acc >>= 2;
+        if (b == 2) {
+            ret[i] = '\0';
+        } else if (b == 3) {
+            ret[i] = '/';
+        } else if (b == 1) {
+            ret[i] = x[i];
+        } else {
+            assert(false && "unexpected bits");
+        }
+    }
+}
+
+void NOINLINE encode_40_le(const char x[32], char ret[40]) {
     uint64_t acc = 0;
     for (int i = 0; i < 32; i++) {
         if (x[i] == 0) {
@@ -65,33 +132,21 @@ void NOINLINE xform(const char x[32], char ret[40]) {
     memcpy(ret + 32, &acc, 8);
 }
 
-void printbits_32(uint32_t x) {
+void NOINLINE decode_40_le(const char x[40], char ret[32]) {
+    uint64_t acc;
+    memcpy(&acc, x + 32, 8);
     for (int i = 0; i < 32; i++) {
-        if ((x >> (31 - i)) & 1) {
-            printf("1");
+        int b = (acc >> (i * 2)) & 0b11;
+        if (b == 2) {
+            ret[i] = '\0';
+        } else if (b == 3) {
+            ret[i] = '/';
+        } else if (b == 1) {
+            ret[i] = x[i];
         } else {
-            printf("0");
+            assert(false && "unexpected bits");
         }
     }
-    printf("\n");
-}
-
-void printbits_64(uint64_t x) {
-    for (int i = 0; i < 64; i++) {
-        if ((x >> (64 - i)) & 1) {
-            printf("1");
-        } else {
-            printf("0");
-        }
-    }
-    printf("\n");
-}
-
-void printhex(const char *x, int n) {
-    for (int i = 0; i < n; i++) {
-        printf("%02x ", (uint8_t)x[i]);
-    }
-    printf("\n\n");
 }
 
 // each position gets 2 bits in the mask
@@ -100,8 +155,8 @@ void printhex(const char *x, int n) {
 // 01 - okay
 // 10 - zero
 // 11 - slash
-//
-void NOINLINE xform_simd(const char x[32], char ret[40]) {
+// this matches encode_40_le's output
+void NOINLINE encode_40_simd(const char x[32], char ret[40]) {
     __m256i y = _mm256_loadu_si256((__m256i*) x);
     __m256i is_zero = _mm256_cmpeq_epi8(y, _mm256_set1_epi8(0));
     __m256i is_slash = _mm256_cmpeq_epi8(y, _mm256_set1_epi8('/'));
@@ -119,7 +174,7 @@ void NOINLINE xform_simd(const char x[32], char ret[40]) {
     memcpy(ret + 32, &mask, 8);
 }
 
-void NOINLINE xform_invert_simd(const char x[40], char ret[32]) {
+void NOINLINE decode_40_simd(const char x[40], char ret[32]) {
     uint64_t mask;
     memcpy(&mask, x + 32, 8);
     uint32_2 masks = deinterleave(mask);
@@ -134,6 +189,90 @@ void NOINLINE xform_invert_simd(const char x[40], char ret[32]) {
     __m256i y = _mm256_loadu_si256((__m256i*) x);
     y = _mm256_blendv_epi8(y, _mm256_set1_epi8(0), is_zero);
     y = _mm256_blendv_epi8(y, _mm256_set1_epi8('/'), is_slash);
+    _mm256_storeu_si256((__m256i*) ret, y);
+}
+
+// note that encode_37 and encode_37_simd use opposite endian for
+// the bits. encode_37 stores them like
+// low mem -> high mem
+// encode_37:      1ddd_dddd 1ccc_cccd 1bbb_bbcc 1aaa_abbb 1xxx_aaaa
+// encode_37_simd: 1aaa_aaaa 1bbb_bbba 1ccc_ccbb 1ddd_dccc 1xxx_dddd
+
+void NOINLINE encode_37(const char x[32], char ret[37]) {
+    uint32_t bits = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t a;
+        memcpy(&a, x + i * 8, 8);
+        bits <<= 8;
+        // grab the msb of each byte
+        // 0x80 == 0b1000_0000
+        bits |= _pext_u64(a, 0x8080808080808080);
+        // set the msb of each byte
+        a |= 0x8080808080808080;
+        memcpy(ret + i * 8, &a, 8);
+    }
+    // for 64 bit a, b, c, d
+    // bits = aaaa_aaaa bbbb_bbbb cccc_cccc dddd_dddd
+    // put 28 bits into the low 7 bits of each byte
+    // 1aaa_abbb 1bbb_bbcc 1ccc_cccd 1ddd_dddd
+    // 0x7f = 0b0111_1111
+    uint32_t b = _pdep_u32(bits, 0x7f7f7f7f) | 0x80808080;
+    // 1xxx_aaaa
+    uint8_t c = bits >> 28 | 0x80;
+    memcpy(ret + 32, &b, 4);
+    memcpy(ret + 36, &c, 1);
+}
+
+void NOINLINE decode_37(const char x[37], char ret[32]) {
+    uint32_t b;
+    uint8_t c;
+    memcpy(&b, x + 32, 4);
+    memcpy(&c, x + 36, 1);
+    uint32_t bits = _pext_u32(b, 0x7f7f7f7f) | (uint32_t)c << 28;
+    for (int i = 3; i >= 0; i--) {
+        uint64_t a;
+        memcpy(&a, x + i * 8, 8);
+        // mask off msb of each byte
+        a &= 0x7f7f7f7f7f7f7f7f;
+        // spread the byte in b to the msb of each byte
+        a |= _pdep_u64(bits & 0xff, 0x8080808080808080);
+        bits >>= 8;
+        memcpy(ret + i * 8, &a, 8);
+    }
+}
+
+void NOINLINE encode_37_simd(const char x[32], char ret[37]) {
+    __m256i y = _mm256_loadu_si256((__m256i*) x);
+    // msb of each byte is same as checking for byte < 0
+    // we can only use gt, so invert when we get the mask
+    __m256i gt_zero = _mm256_cmpgt_epi8(y, _mm256_set1_epi8(-1));
+    uint32_t bits = ~_mm256_movemask_epi8(gt_zero);
+
+    y = _mm256_or_si256(y, _mm256_set1_epi8(0x80));
+    _mm256_storeu_si256((__m256i*) ret, y);
+
+    uint32_t b = _pdep_u32(bits, 0x7f7f7f7f);
+    b |= 0x80808080;
+    uint8_t c = bits >> 28 | 0x80;
+    memcpy(ret + 32, &b, 4);
+    memcpy(ret + 36, &c, 1);
+}
+
+void NOINLINE decode_37_simd(const char x[37], char ret[32]) {
+    uint32_t b;
+    uint8_t c;
+    memcpy(&b, x + 32, 4);
+    memcpy(&c, x + 36, 1);
+    uint32_t bits = _pext_u32(b, 0x7f7f7f7f) | (uint32_t)c << 28;
+
+    __m256i y = _mm256_loadu_si256((__m256i*) x);
+    // expand_mask puts 0xff in each byte where the bit is 1
+    // so mask off the lower 7 to just get the high bit
+    __m256i msb = _mm256_and_si256(expand_mask(bits), _mm256_set1_epi8(0x80));
+    y = _mm256_or_si256(
+            _mm256_and_si256(y, _mm256_set1_epi8(0x7f)),
+            msb
+            );
     _mm256_storeu_si256((__m256i*) ret, y);
 }
 
@@ -177,26 +316,8 @@ void NOINLINE encode_hex(const char x[32], char ret[65]) {
 
 inline static __m256i unhexBitManip(const __m256i value) {
     __m256i and15 = _mm256_and_si256(value, _mm256_set1_epi16(15));
-
-#ifndef NO_MADDUBS
     __m256i sr6 = _mm256_srai_epi16(value, 6);
     __m256i mul = _mm256_maddubs_epi16(sr6, _mm256_set1_epi16(9)); // this has a latency of 5
-#else
-    // ... while this I think has a latency of 4, but worse throughput(?).
-    // (x >> 6) * 9 is x * 8 + x:
-    // ((x >> 6) << 3) + (x >> 6)
-    // We need & 0b11 to emulate 8-bit operations (narrowest shift is 16b) -- or a left shift
-    // (((x >> 6) & 0b11) << 3) + ((x >> 6) & 0b11)
-    // or
-    // tmp = (x >> 6) & 0b11
-    // tmp << 3 + tmp
-    // there's no carry due to the mask+shift combo, so + is |
-    // tmp << 3 | tmp
-    __m256i sr6_lo2 = _mm256_and_si256(_mm256_srli_epi16(value, 6), _mm256_set1_epi16(0b11));
-    __m256i sr6_lo2_sl3 = _mm256_slli_epi16(sr6_lo2, 3);
-    __m256i mul = _mm256_or_si256(sr6_lo2_sl3, sr6_lo2);
-#endif
-
     __m256i add = _mm256_add_epi16(mul, and15);
     return add;
 }
@@ -240,81 +361,130 @@ void NOINLINE decode_hex(uint8_t* __restrict__ src, const uint8_t* __restrict__ 
     __m256i bytes = nib2byte(a1, b1, a2, b2);
 
     _mm256_storeu_si256(dec256, bytes);
-
 }
-
 // -- end fast-hex code
+
+int check(char x[32], char* y, size_t n, char z[32]) {
+    for (size_t i = 0; i < n; i++) {
+        if (y[i] == '\0') {
+            printf("ERR, byte %ld is null\n", i);
+            return 0;
+        } else if (y[i] == '/') {
+            printf("ERR, byte %ld is '/'\n", i);
+            return 0;
+        }
+    }
+    if (memcmp(x, z, 32) == 0) {
+        return 1;
+    } else {
+        printf("ERR, roundtrip fail\n");
+        printhex(x, 32);
+        printhex(y, n);
+        printhex(z, 32);
+        return 0;
+    }
+}
 
 int main(int argc, char **argv) {
     char x[32], xx[32];
-    memset(x, 1, 32);
     char y[40];
     char z[65];
 
-
+    memset(x, 1, 32);
     x[0] = 0;
+    x[5] = '\xf1';
     x[10] = 0;
+    x[15] = '\xf3';
     x[20] = '/';
     x[31] = '/';
 
+#ifdef TEST
+
+    printf("input\n");
     printhex(x, 32);
 
-    xform(x, y);
-    printhex(y, 40);
-    memset(y, 0, 40);
-
-    xform_simd(x, y);
-    printhex(y, 40);
-
-    memset(z, 0, 40);
-    xform_invert_simd(y, z);
+#define CASE(n, encoder, decoder) \
+    memset(y, 0, n); \
+    memset(z, 0, 32); \
+    printf(#encoder "\n"); \
+    encoder(x, y); \
+    decoder(y, z); \
+    assert(check(x, y, n, z)); \
+    printhex(y, n); \
     printhex(z, 32);
+
+    CASE(40, encode_40_le, decode_40_le);
+    CASE(40, encode_40_be, decode_40_be);
+    CASE(40, encode_40_simd, decode_40_simd);
+    CASE(37, encode_37, decode_37);
+    CASE(37, encode_37_simd, decode_37_simd);
 
     char test[32];
     for (int i = 0; i < 32; i++) {test[i] = i;}
     encode_hex(test, z);
-    printf("hextest: %s\n", z);
+    printf("\nhextest: %s\n", z);
     memset(test, 0, 32);
     decode_hex((uint8_t*)z, (uint8_t*)test);
-    for (int i = 0; i < 32; i++) {printf("%d ", test[i]);}
+    for (int i = 0; i < 32; i++) {
+        assert(test[i] == i);
+        printf("%d ", test[i]);
+    }
     printf("\n\n");
 
     /*printbits_32(1);*/
     /*printbits_32(0xff00ff00);*/
 
-    /*return 0;*/
+    return 0;
+#endif
 
     Timespec start, stop;
 
     int iters = 10 * 1000000;
 
-    uint64_t acc = 0;
-    clock_ns(&start);
-    for (int i = 0; i < iters; i++) {
-        xform(x, y);
-        acc += y[39];
-    }
-    clock_ns(&stop);
-    printf("reg  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+    uint64_t acc;
 
-    acc = 0;
-    clock_ns(&start);
-    for (int i = 0; i < iters; i++) {
-        xform_simd(x, y);
-        acc += y[39];
-    }
-    clock_ns(&stop);
-    printf("simd acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+#define BENCH(encoder, decoder) \
+    acc = 0; \
+    clock_ns(&start); \
+    for (int i = 0; i < iters; i++) { \
+        encoder(x, y); \
+        acc += y[33]; \
+    } \
+    clock_ns(&stop);\
+    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", #encoder, acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters); \
+    acc = 0; \
+    clock_ns(&start); \
+    for (int i = 0; i < iters; i++) { \
+        decoder(y, xx); \
+        acc += xx[9]; \
+    } \
+    clock_ns(&stop); \
+    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", #decoder, acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
 
-    acc = 0;
-    clock_ns(&start);
-    for (int i = 0; i < iters; i++) {
-        xform_invert_simd(y, xx);
-        acc += xx[9];
-    }
-    clock_ns(&stop);
-    printf("invert  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+    BENCH(encode_40_le, decode_40_le);
+    BENCH(encode_40_be, decode_40_be);
+    BENCH(encode_40_simd, decode_40_simd);
+    BENCH(encode_37, decode_37);
+    BENCH(encode_37_simd, decode_37_simd);
 
+    /*acc = 0;*/
+    /*clock_ns(&start);*/
+    /*for (int i = 0; i < iters; i++) {*/
+    /*    encode_40_simd(x, y);*/
+    /*    acc += y[39];*/
+    /*}*/
+    /*clock_ns(&stop);*/
+    /*printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "encode_40_simd", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);*/
+    /**/
+    /*acc = 0;*/
+    /*clock_ns(&start);*/
+    /*for (int i = 0; i < iters; i++) {*/
+    /*    decode_40_simd(y, xx);*/
+    /*    acc += xx[9];*/
+    /*}*/
+    /*clock_ns(&stop);*/
+    /*printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "decode_40_simd", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);*/
+    /**/
     acc = 0;
     clock_ns(&start);
     for (int i = 0; i < iters; i++) {
@@ -322,7 +492,7 @@ int main(int argc, char **argv) {
         acc += z[39];
     }
     clock_ns(&stop);
-    printf("hex  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "encode_hex", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
 
     acc = 0;
     clock_ns(&start);
@@ -332,7 +502,7 @@ int main(int argc, char **argv) {
         acc += y[3];
     }
     clock_ns(&stop);
-    printf("hexdec  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "decode_hex", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
 
     acc = 0;
     size_t l; // this will be 44
@@ -342,7 +512,7 @@ int main(int argc, char **argv) {
         acc += l;
     }
     clock_ns(&stop);
-    printf("binary_to_base64  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "base64_encode", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
 
     acc = 0;
     clock_ns(&start);
@@ -351,10 +521,11 @@ int main(int argc, char **argv) {
         acc += r.error;
     }
     clock_ns(&stop);
-    printf("base64_to_binary  acc=%lx elapsed=%ld per_iter=%.2f\n", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "base64_decode", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+
 }
 
-//  ls digest.c | entr -c bash -c './build.sh &&  llvm-objdump --disassemble-symbols=xform,xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
+//  ls digest.c | entr -c bash -c './build.sh &&  llvm-objdump --disassemble-symbols=xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
 /*
 0000000000401400 <xform_simd>:
   401400: c5 fe 6f 07                  	vmovdqu	ymm0, ymmword ptr [rdi]

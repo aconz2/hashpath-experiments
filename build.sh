@@ -10,6 +10,11 @@ fi
 if [ ! -f simdutf.o ]; then
     clang++ -c -march=native -O2 simdutf.cpp
 fi
-clang -c -march=native -O2 digest.c
-clang++ simdutf.o digest.o -o a.out
+clang -c -DNDEBUG -march=native -O2 -o digest.perf.o digest.c
+clang -c -fsanitize=address -fsanitize=undefined -DTEST -march=native -O2 -o digest.test.o digest.c
+clang++ simdutf.o digest.perf.o -o a.out
+clang++ -fsanitize=address -fsanitize=undefined simdutf.o digest.test.o -o test
+./test
 ./a.out
+
+llvm-objdump -Mintel --disassemble-symbols=encode_40_simd,decode_40_simd,encode_37,decode_37,encode_37_simd,decode_37_simd > dis
