@@ -48,10 +48,23 @@ void printhex(const char *x, int n) {
 }
 
 // -- this code derived from  https://stackoverflow.com/questions/21622212/how-to-perform-the-inverse-of-mm256-movemask-epi8-vpmovmskb
+// my step by step
+// from the original movemask, the lsb of mask is for lane 0, msb is for lane 31
+//   lane 31|                                     |lane 0
+// mask is  dddd_dddd cccc_cccc bbbb_bbbb aaaa_aaaa
+// vmask gets
+//       lane 3  | lane 2 | lane 1 | lane 0
+// vmask: 0x03...| 0x02...| 0x01...| 0x00...
+// vmask: D{8}   | C{8}   | B{8}   | A{8}  # replicate each byte 8 times
+// in each lane, bit_mask picks out each bit, call the bits of A: ZYXW_VUTS
+//           ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS
+// bit_mask: 01111111_10111111_11011111_11101111_11110111_11111011_11111101_11111110
+// bit_mask: Z....... .Y...... ..X..... ...W.... ....V... .....U.. ......T. .......S  # (. == 1 for readability)
+// now cmp each byte against 0xff
+// cmp leaves 0xff for match and 0x00 for no match. Will only match if that one bit was 1
 __m256i expand_mask(const uint32_t mask) {
   __m256i vmask = _mm256_set1_epi32(mask);
-  const __m256i shuffle = _mm256_setr_epi64x(0x0000000000000000,
-      0x0101010101010101, 0x0202020202020202, 0x0303030303030303);
+  const __m256i shuffle = _mm256_setr_epi64x(0x0000000000000000, 0x0101010101010101, 0x0202020202020202, 0x0303030303030303);
   vmask = _mm256_shuffle_epi8(vmask, shuffle);
   const __m256i bit_mask = _mm256_set1_epi64x(0x7fbfdfeff7fbfdfe);
   vmask = _mm256_or_si256(vmask, bit_mask);
@@ -266,11 +279,52 @@ void NOINLINE decode_37_simd(const char x[37], char ret[32]) {
     uint32_t bits = _pext_u32(b, 0x7f7f7f7f) | (uint32_t)c << 28;
 
     __m256i y = _mm256_loadu_si256((__m256i*) x);
+
     // expand_mask puts 0xff in each byte where the bit is 1
     // so mask off the lower 7 to just get the high bit
-    __m256i msb = _mm256_and_si256(expand_mask(bits), _mm256_set1_epi8(0x80));
+    /*__m256i msb = _mm256_and_si256(expand_mask(bits), _mm256_set1_epi8(0x80));*/
+    __m256i msb = _mm256_and_si256(expand_mask(bits), _mm256_set1_epi64x(0x8080808080808080));
+
     y = _mm256_or_si256(
-            _mm256_and_si256(y, _mm256_set1_epi8(0x7f)),
+            /*_mm256_and_si256(y, _mm256_set1_epi8(0x7f)),*/
+            _mm256_and_si256(y, _mm256_set1_epi64x(0x7f7f7f7f7f7f7f7f)),
+            msb
+            );
+    _mm256_storeu_si256((__m256i*) ret, y);
+}
+
+void NOINLINE decode_37_simd_mullo(const char x[37], char ret[32]) {
+    uint32_t b;
+    uint8_t c;
+    memcpy(&b, x + 32, 4);
+    memcpy(&c, x + 36, 1);
+    uint32_t bits = _pext_u32(b, 0x7f7f7f7f) | (uint32_t)c << 28;
+
+    __m256i y = _mm256_loadu_si256((__m256i*) x);
+
+    // alternatively to fixing up the expand_mask, I want
+    //      ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS
+    // msb: Z....... Y....... X....... W....... V....... U....... T....... S.......  # (. == 0 for readability)
+    // but no slli_epi8 :(
+    // the 16 bit number: ZYXWVUTS_ZYXWVUTS
+    // to get             T......._S.......
+    // we need (x << 7) | (x << 14) which is the same as mullo_epi16 with 2**7 + 2**14 == 0x4080
+    // this is bits 0,1 to 7,15 == (7, 14) == 0x4080
+    //              2,3 to 7,15 == (5, 12) == 0x1020
+    //              4,5 to 7,15 == (3, 10) == 0x0408
+    //              6,7 to 7,15 == (1, 8)  == 0x0102
+    //              which we combine to 0x0102040810204080
+    // setup is same as expand_mask
+    __m256i vbits = _mm256_set1_epi32(bits);
+    const __m256i shuffle = _mm256_setr_epi64x(0x0000000000000000, 0x0101010101010101, 0x0202020202020202, 0x0303030303030303);
+    vbits = _mm256_shuffle_epi8(vbits, shuffle);
+    const __m256i shift = _mm256_set1_epi64x(0x0102040810204080);
+    /*__m256i msb = _mm256_and_si256(_mm256_mullo_epi16(vbits, shift), _mm256_set1_epi8(0x80));*/
+    __m256i msb = _mm256_and_si256(_mm256_mullo_epi16(vbits, shift), _mm256_set1_epi64x(0x8080808080808080));
+
+    y = _mm256_or_si256(
+            /*_mm256_and_si256(y, _mm256_set1_epi8(0x7f)),*/
+            _mm256_and_si256(y, _mm256_set1_epi64x(0x7f7f7f7f7f7f7f7f)),
             msb
             );
     _mm256_storeu_si256((__m256i*) ret, y);
@@ -418,6 +472,7 @@ int main(int argc, char **argv) {
     CASE(40, encode_40_simd, decode_40_simd);
     CASE(37, encode_37, decode_37);
     CASE(37, encode_37_simd, decode_37_simd);
+    CASE(37, encode_37_simd, decode_37_simd_mullo);
 
     char test[32];
     for (int i = 0; i < 32; i++) {test[i] = i;}
@@ -467,24 +522,15 @@ int main(int argc, char **argv) {
     BENCH(encode_37, decode_37);
     BENCH(encode_37_simd, decode_37_simd);
 
-    /*acc = 0;*/
-    /*clock_ns(&start);*/
-    /*for (int i = 0; i < iters; i++) {*/
-    /*    encode_40_simd(x, y);*/
-    /*    acc += y[39];*/
-    /*}*/
-    /*clock_ns(&stop);*/
-    /*printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "encode_40_simd", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);*/
-    /**/
-    /*acc = 0;*/
-    /*clock_ns(&start);*/
-    /*for (int i = 0; i < iters; i++) {*/
-    /*    decode_40_simd(y, xx);*/
-    /*    acc += xx[9];*/
-    /*}*/
-    /*clock_ns(&stop);*/
-    /*printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "decode_40_simd", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);*/
-    /**/
+    acc = 0;
+    clock_ns(&start);
+    for (int i = 0; i < iters; i++) {
+        decode_37_simd_mullo(x, y);
+        acc += y[33];
+    }
+    clock_ns(&stop);
+    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "decode_37_simd_mullo", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+
     acc = 0;
     clock_ns(&start);
     for (int i = 0; i < iters; i++) {
