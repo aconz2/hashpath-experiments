@@ -681,16 +681,8 @@ int main(int argc, char **argv) {
 
     BENCH(encode_37, decode_37);
     BENCH(encode_37_simd, decode_37_simd);
+    BENCH(encode_37_simd, decode_37_simd_mullo);
     /*BENCH(encode_48_utf8, decode_48_utf8);*/
-
-    acc = 0;
-    clock_ns(&start);
-    for (int i = 0; i < iters; i++) {
-        decode_37_simd_mullo(x, y);
-        acc += y[33];
-    }
-    clock_ns(&stop);
-    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "decode_37_simd_mullo", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
 
     acc = 0;
     clock_ns(&start);
