@@ -283,12 +283,14 @@ void NOINLINE decode_37_simd(const char x[37], char ret[32]) {
 
     // expand_mask puts 0xff in each byte where the bit is 1
     // so mask off the lower 7 to just get the high bit
-    __m256i msb = _mm256_and_si256(expand_mask(bits), _mm256_set1_epi8(0x80));
+    __m256i msb_mask = _mm256_set1_epi8(0x80);
+    __m256i msb = _mm256_and_si256(expand_mask(bits), msb_mask);
 
-    y = _mm256_or_si256(
-            _mm256_and_si256(y, _mm256_set1_epi8(0x7f)),
-            msb
-            );
+    // these two lines are the same but saves a constant load
+    /*y = _mm256_and_si256(y, _mm256_set1_epi8(0x7f));*/
+    y = _mm256_andnot_si256(msb_mask, y);
+
+    y = _mm256_or_si256(y, msb);
     _mm256_storeu_si256((__m256i*) ret, y);
 }
 
@@ -441,7 +443,6 @@ void NOINLINE encode_40_alt_simd(const char x[32], char ret[40]) {
     __m256i y = _mm256_loadu_si256((__m256i*) x);
 
     const __m256i shifts = _mm256_set_epi64x(4, 5, 6, 7); // maybe use a cvtepu8_epi64?
-                                                          //
     __m256i z = _mm256_srlv_epi64(_mm256_and_si256(y, _mm256_set1_epi64x(0x8080808080808080)), shifts);
     // or reduce the 4 u64
     // clang chooses to do 1 shuf then an extractf128 and or
