@@ -56,12 +56,11 @@ void printhex(const char *x, int n) {
 // -- this code derived from  https://stackoverflow.com/questions/21622212/how-to-perform-the-inverse-of-mm256-movemask-epi8-vpmovmskb
 // my step by step
 // from the original movemask, the lsb of mask is for lane 0, msb is for lane 31
-//   lane 31|                                     |lane 0
+//    lane 4|                                     |lane 0
 // mask is  dddd_dddd cccc_cccc bbbb_bbbb aaaa_aaaa
-// vmask gets
-//       lane 3  | lane 2 | lane 1 | lane 0
-// vmask: 0x03...| 0x02...| 0x01...| 0x00...
-// vmask: D{8}   | C{8}   | B{8}   | A{8}  # replicate each byte 8 times
+//         lane 3  | lane 2 | lane 1 | lane 0  (64 bit lanes)
+// shuffle: 0x03...| 0x02...| 0x01...| 0x00...
+// vmask:   D{8}   | C{8}   | B{8}   | A{8}  # replicate each byte 8 times
 // in each lane, bit_mask picks out each bit, call the bits of A: ZYXW_VUTS
 //           ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS
 // bit_mask: 01111111_10111111_11011111_11101111_11110111_11111011_11111101_11111110
@@ -69,31 +68,31 @@ void printhex(const char *x, int n) {
 // now cmp each byte against 0xff
 // cmp leaves 0xff for match and 0x00 for no match. Will only match if that one bit was 1
 __m256i expand_mask(const uint32_t mask) {
-  __m256i vmask = _mm256_set1_epi32(mask);
-  const __m256i shuffle = _mm256_setr_epi64x(0x0000000000000000, 0x0101010101010101, 0x0202020202020202, 0x0303030303030303);
-  vmask = _mm256_shuffle_epi8(vmask, shuffle);
-  const __m256i bit_mask = _mm256_set1_epi64x(0x7fbfdfeff7fbfdfe);
-  vmask = _mm256_or_si256(vmask, bit_mask);
-  return _mm256_cmpeq_epi8(vmask, _mm256_set1_epi64x(-1));
+    __m256i vmask = _mm256_set1_epi32(mask);
+    const __m256i shuffle = _mm256_setr_epi64x(0x0000000000000000, 0x0101010101010101, 0x0202020202020202, 0x0303030303030303);
+    vmask = _mm256_shuffle_epi8(vmask, shuffle);
+    const __m256i bit_mask = _mm256_set1_epi64x(0x7fbfdfeff7fbfdfe);
+    vmask = _mm256_or_si256(vmask, bit_mask);
+    return _mm256_cmpeq_epi8(vmask, _mm256_set1_epi64x(-1));
 }
 // -- end SO code
 
 // -- this code dervied from https://github.com/lemire/Code-used-on-Daniel-Lemire-s-blog/blob/master/2018/01/09/simdinterleave.c
 typedef struct {
-  uint32_t lo;
-  uint32_t hi;
+    uint32_t lo;
+    uint32_t hi;
 } uint32_2;
 
 uint64_t interleave(uint32_t lo, uint32_t  hi) {
-  return _pdep_u64(lo, 0x5555555555555555) |
-         _pdep_u64(hi, 0xaaaaaaaaaaaaaaaa);
+    return _pdep_u64(lo, 0x5555555555555555) |
+           _pdep_u64(hi, 0xaaaaaaaaaaaaaaaa);
 }
 
 uint32_2 deinterleave(uint64_t input) {
-  uint32_2 ret;
-  ret.lo = _pext_u64(input, 0x5555555555555555);
-  ret.hi = _pext_u64(input, 0xaaaaaaaaaaaaaaaa);
-  return ret;
+    uint32_2 ret;
+    ret.lo = _pext_u64(input, 0x5555555555555555);
+    ret.hi = _pext_u64(input, 0xaaaaaaaaaaaaaaaa);
+    return ret;
 }
 // -- end lemire code
 
@@ -226,7 +225,6 @@ void NOINLINE encode_37(const char x[32], char ret[37]) {
         a |= 0x8080808080808080;
         memcpy(ret + i * 8, &a, 8);
     }
-    // for 64 bit a, b, c, d
     //     msb|                                     |lsb
     // bits = dddd_dddd cccc_cccc bbbb_bbbb aaaa_aaaa
     // put 28 bits into the low 7 bits of each byte
@@ -288,8 +286,7 @@ void NOINLINE decode_37_simd(const char x[37], char ret[32]) {
     __m256i msb = _mm256_and_si256(expand_mask(bits), _mm256_set1_epi8(0x80));
 
     y = _mm256_or_si256(
-            /*_mm256_and_si256(y, _mm256_set1_epi8(0x7f)),*/
-            _mm256_and_si256(y, _mm256_set1_epi64x(0x7f7f7f7f7f7f7f7f)),
+            _mm256_and_si256(y, _mm256_set1_epi8(0x7f)),
             msb
             );
     _mm256_storeu_si256((__m256i*) ret, y);
@@ -305,27 +302,101 @@ void NOINLINE decode_37_simd_mullo(const char x[37], char ret[32]) {
     __m256i y = _mm256_loadu_si256((__m256i*) x);
 
     // alternatively to fixing up the expand_mask, I want
-    //      ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS_ZYXWVUTS
-    // msb: Z....... Y....... X....... W....... V....... U....... T....... S.......  # (. == 0 for readability)
-    // but no slli_epi8 :(
-    // the 16 bit number: ZYXWVUTS_ZYXWVUTS
-    // to get             T......._S.......
-    // we need (x << 7) | (x << 14) which is the same as mullo_epi16 with 2**7 + 2**14 == 0x4080
-    // this is bits 0,1 to 7,15 == (7, 14) == 0x4080
-    //              2,3 to 7,15 == (5, 12) == 0x1020
-    //              4,5 to 7,15 == (3, 10) == 0x0408
-    //              6,7 to 7,15 == (1, 8)  == 0x0102
-    //              which we combine to 0x0102040810204080
+    //       ZYXWVUTS | ZYXWVUTS | ZYXWVUTS | ZYXWVUTS | ZYXWVUTS | ZYXWVUTS | ZYXWVUTS | ZYXWVUTS
+    // mask  Z....... | .Y...... | ..X..... | ...W.... | ....V... | .....U.. | ......T. | .......S # (. == 0 for readability)
+    // shift Z....... | Y....... | X....... | W....... | V....... | U....... | T....... | S.......
+    // but no sllv_epi8 :(
+    //
+    // doing both shifts in one go works if we isolate the bits
+    // the 16 bit number: ......T._.......S
+    // left shift by 7  : ........_S.......
+    // left shift by 6 :  T......._.S......
+    // add              : T......._SS......
+    // does work!
+    // so shift by 1,0 3,2 5,4 7,6 == 0x0003 000c 0030 00c0
+    //
+    // another way is to split in two
+    //       ZYXWVUTS ZYXWVUTS | ZYXWVUTS ZYXWVUTS | ZYXWVUTS ZYXWVUTS | ZYXWVUTS ZYXWVUTS
+    // mask  ........ .Y...... | ........ ...W.... | ........ .....U.. | ........ .......S
+    // shift ........ Y....... | ........ W....... | ........ U....... | ........ S.......
+    //
+    // mask  Z....... ........ | ..X..... ........ | ....V... ........ | ......T. ........
+    // shift Z....... ........ | X....... ........ | V....... ........ | T....... ........
+    //
+    //       ........ Y....... | ........ W....... | ........ U....... | ........ S.......
+    //       Z....... ........ | X....... ........ | V....... ........ | T....... ........
+    // or    Z....... Y....... | X....... W....... | V....... U....... | T....... S.......
+    //
+    // for the first  shift we need shifts of: 1 == 0x0002, 3 == 0x0008, 5 == 0x0020, 7 == 0x0080 combine to 0x0002000800200080
+    // for the second shift we need shifts of: 0 == 0x0001, 2 == 0x0004, 4 == 0x0010, 6 == 0x0040 combine to 0x0000000400100040
+    //
+    // to pick out increasing bits from increasing bytes we need the mask
+    // 10000000 01000000 00100000 00010000 00001000 00000100 00000010 00000001 == 0x8040201008040201
+    //
+    // another way is to interleave with 0's
+    //  .Z.Y.X.W|.V.U.T.S
+    //  W.V.U.T.|S....... 7
+    //  X.W.V.U.|T.S..... 5
+    //  Y.X.W.V.|U.T.S... 3
+    //  Z.Y.X.W.|V.U.T.S. 1
+    //
+    //     shift 1                 shift 3             shift 5              shift 7
+    //  Z.Y.X.W.|V.U.T.S. || Y.X.W.V.|U.T.S... || X.W.V.U.|T.S..... || W.V.U.T.|S.......
+    //  mul by 0002 0008 0020 0080
+    //
+    //     7       6            5       4           3          2          1         0
+    //  Z.Y.X.W.|V.U.T.S. || Y.X.W.V.|U.T.S... || X.W.V.U.|T.S..... || W.V.U.T.|S.......
+    //  want 7 5 3 1 6 4 2 0 within a 64 bit lane
+    //  so 0x0705030106040200
+    //  but in 128 bit lanes, we want
+    //  15 13 11 9 14 12 10 8 | 7 5 3 1 6 4 2 0
+    //  f d b 9 e c a 8  | 7 5 3 1 6 4 2 0
+
     // setup is same as expand_mask
+#define IMPL 1
+#if IMPL == 1
     __m256i vbits = _mm256_set1_epi32(bits);
     const __m256i shuffle = _mm256_setr_epi64x(0x0000000000000000, 0x0101010101010101, 0x0202020202020202, 0x0303030303030303);
     vbits = _mm256_shuffle_epi8(vbits, shuffle);
-    const __m256i shift = _mm256_set1_epi64x(0x0102040810204080);
-    __m256i msb = _mm256_and_si256(_mm256_mullo_epi16(vbits, shift), _mm256_set1_epi8(0x80));
+
+    // to isolate hi and lo bytes of 16-bit, we and it with 0xff00 and 0x00ff resp.
+    __m256i vbits_hi = _mm256_and_si256(vbits, _mm256_set1_epi64x(0x8040201008040201 & 0xff00ff00ff00ff00));
+    __m256i vbits_lo = _mm256_and_si256(vbits, _mm256_set1_epi64x(0x8040201008040201 & 0x00ff00ff00ff00ff));
+
+    vbits_hi = _mm256_mullo_epi16(vbits_hi, _mm256_set1_epi64x(0x0001000400100040));
+    vbits_lo = _mm256_mullo_epi16(vbits_lo, _mm256_set1_epi64x(0x0002000800200080));
+    __m256i msb = _mm256_or_si256(vbits_hi, vbits_lo);
+#elif IMPL == 2
+    __m256i vbits = _mm256_set1_epi64x(interleave(bits, 0));
+
+    // each a1 a0 is the 8 bits from a interleaved with zeros like .Z.Y.X.W|.V.U.T.S
+    // 7  6  5  4  3  2  1  0  (64 bit lane)
+    // d1 d0 c1 c0 b1 b0 a1 a0
+    // we now replicate each 16 bit to each lane
+    // (d1,d0){4} (c1,c0){4} (b1,b0){4} (a1,a0){4}
+    const __m256i shuffle = _mm256_set_epi64x(0x0706070607060706, 0x0504050405040504, 0x0302030203020302, 0x0100010001000100);
+    vbits = _mm256_shuffle_epi8(vbits, shuffle);
+    vbits = _mm256_mullo_epi16(vbits, _mm256_set1_epi64x(0x0002000800200080));
+
+    __m256i shuffle2 = _mm256_set_epi64x(0x0f0d0b090e0c0a08, 0x0705030106040200, 0x0f0d0b090e0c0a08, 0x0705030106040200);
+    vbits = _mm256_shuffle_epi8(vbits, shuffle2);
+    __m256i msb = _mm256_and_si256(vbits, _mm256_set1_epi8(0x80));
+
+#else
+    __m256i vbits = _mm256_set1_epi32(bits);
+
+    const __m256i shuffle = _mm256_setr_epi64x(0x0000000000000000, 0x0101010101010101, 0x0202020202020202, 0x0303030303030303);
+    vbits = _mm256_shuffle_epi8(vbits, shuffle);
+
+    // isolate increasing bits in increasing bytes
+    vbits = _mm256_and_si256(vbits, _mm256_set1_epi64x(0x8040201008040201));
+    vbits = _mm256_mullo_epi16(vbits, _mm256_set1_epi64x(0x0003000c003000c0));
+    __m256i msb = _mm256_and_si256(vbits, _mm256_set1_epi8(0x80));
+
+#endif
 
     y = _mm256_or_si256(
-            /*_mm256_and_si256(y, _mm256_set1_epi8(0x7f)),*/
-            _mm256_and_si256(y, _mm256_set1_epi64x(0x7f7f7f7f7f7f7f7f)),
+            _mm256_and_si256(y, _mm256_set1_epi8(0x7f)),
             msb
             );
     _mm256_storeu_si256((__m256i*) ret, y);
@@ -582,7 +653,17 @@ int main(int argc, char **argv) {
     x[10] = 0;
     x[15] = '\xf3';
     x[20] = '/';
+    x[21] = '\xff';
+    x[22] = '\xff';
+    x[23] = '\xff';
+    x[24] = '\xff';
+    x[25] = '\xff';
+    x[26] = '\xff';
+    x[27] = '\xff';
+    x[28] = '\xff';
     x[31] = '/';
+
+    // settings 8 bytes in a row to ff tests mullo for correctness
 
 #ifdef TEST
 
@@ -608,8 +689,9 @@ int main(int argc, char **argv) {
     CASE(40, encode_40_alt_simd, decode_40_alt);
     CASE(40, encode_40_alt, decode_40_alt_simd);
 
-    CASE(37, encode_37_simd, decode_37_simd);
     CASE(37, encode_37, decode_37);
+    CASE(37, encode_37_simd, decode_37_simd);
+    printf("decode_37_simd_mullo\n");
     CASE(37, encode_37_simd, decode_37_simd_mullo);
     // check interop between the simd version and not
     CASE(37, encode_37, decode_37_simd);

@@ -10,8 +10,8 @@ fi
 if [ ! -f simdutf.o ]; then
     clang++ -c -march=native -O2 simdutf.cpp
 fi
+clang -Wall -Werror -c -fsanitize=address -fsanitize=undefined -DTEST -march=native -O2 -o digest.test.o digest.c
 clang -c -DNDEBUG -march=native -O2 -o digest.perf.o digest.c
-clang -c -fsanitize=address -fsanitize=undefined -DTEST -march=native -O2 -o digest.test.o digest.c
 clang++ simdutf.o digest.perf.o -o a.out
 clang++ -fsanitize=address -fsanitize=undefined simdutf.o digest.test.o -o test
 ./test
