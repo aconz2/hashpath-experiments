@@ -211,38 +211,29 @@ void NOINLINE decode_40_simd(const char x[40], char ret[32]) {
     _mm256_storeu_si256((__m256i*) ret, y);
 }
 
-// note that encode_37 and encode_37_simd use opposite endian for
-// the bits. encode_37 stores them like
-// low mem -> high mem
-// encode_37:      1ddd_dddd 1ccc_cccd 1bbb_bbcc 1aaa_abbb 1xxx_aaaa
-// encode_37_simd: 1aaa_aaaa 1bbb_bbba 1ccc_ccbb 1ddd_dccc 1xxx_dddd
-// so to be compatible one of them needs a __builtin_bswap32 on bits
-// I see no perf difference with the bswap
-#define ENCODE_37_BSWAP
+// the extra 5 bytes are the msb of each byte in the input
+// 1aaa_aaaa 1bbb_bbba 1ccc_ccbb 1ddd_dccc 1xxx_dddd
 
 void NOINLINE encode_37(const char x[32], char ret[37]) {
     uint32_t bits = 0;
     for (int i = 0; i < 4; i++) {
         uint64_t a;
         memcpy(&a, x + i * 8, 8);
-        bits <<= 8;
         // grab the msb of each byte
         // 0x80 == 0b1000_0000
-        bits |= _pext_u64(a, 0x8080808080808080);
+        bits |= _pext_u64(a, 0x8080808080808080) << (i * 8);
         // set the msb of each byte
         a |= 0x8080808080808080;
         memcpy(ret + i * 8, &a, 8);
     }
-#ifdef ENCODE_37_BSWAP
-    bits = __builtin_bswap32(bits);
-#endif
     // for 64 bit a, b, c, d
-    // bits = aaaa_aaaa bbbb_bbbb cccc_cccc dddd_dddd
+    //     msb|                                     |lsb
+    // bits = dddd_dddd cccc_cccc bbbb_bbbb aaaa_aaaa
     // put 28 bits into the low 7 bits of each byte
-    // 1aaa_abbb 1bbb_bbcc 1ccc_cccd 1ddd_dddd
+    // 1ddd_dccc 1ccc_ccbb 1bbb_bbba 1aaa_aaaa
     // 0x7f = 0b0111_1111
     uint32_t b = _pdep_u32(bits, 0x7f7f7f7f) | 0x80808080;
-    // 1xxx_aaaa
+    // 1xxx_dddd
     uint8_t c = bits >> 28 | 0x80;
     memcpy(ret + 32, &b, 4);
     memcpy(ret + 36, &c, 1);
@@ -254,15 +245,12 @@ void NOINLINE decode_37(const char x[37], char ret[32]) {
     memcpy(&b, x + 32, 4);
     memcpy(&c, x + 36, 1);
     uint32_t bits = _pext_u32(b, 0x7f7f7f7f) | (uint32_t)c << 28;
-#ifdef ENCODE_37_BSWAP
-    bits = __builtin_bswap32(bits);
-#endif
-    for (int i = 3; i >= 0; i--) {
+    for (int i = 0; i < 4; i++) {
         uint64_t a;
         memcpy(&a, x + i * 8, 8);
         // mask off msb of each byte
         a &= 0x7f7f7f7f7f7f7f7f;
-        // spread the byte in b to the msb of each byte
+        // spread the byte in bits to the msb of each byte
         a |= _pdep_u64(bits & 0xff, 0x8080808080808080);
         bits >>= 8;
         memcpy(ret + i * 8, &a, 8);
@@ -273,8 +261,8 @@ void NOINLINE encode_37_simd(const char x[32], char ret[37]) {
     __m256i y = _mm256_loadu_si256((__m256i*) x);
     // msb of each byte is same as checking for byte < 0
     // we can only use gt, so invert when we get the mask
-    __m256i gt_zero = _mm256_cmpgt_epi8(y, _mm256_set1_epi8(-1));
-    uint32_t bits = ~_mm256_movemask_epi8(gt_zero);
+    __m256i gte_zero = _mm256_cmpgt_epi8(y, _mm256_set1_epi8(-1));
+    uint32_t bits = ~_mm256_movemask_epi8(gte_zero);
 
     y = _mm256_or_si256(y, _mm256_set1_epi8(0x80));
     _mm256_storeu_si256((__m256i*) ret, y);
@@ -620,8 +608,8 @@ int main(int argc, char **argv) {
     CASE(40, encode_40_alt_simd, decode_40_alt);
     CASE(40, encode_40_alt, decode_40_alt_simd);
 
-    CASE(37, encode_37, decode_37);
     CASE(37, encode_37_simd, decode_37_simd);
+    CASE(37, encode_37, decode_37);
     CASE(37, encode_37_simd, decode_37_simd_mullo);
     // check interop between the simd version and not
     CASE(37, encode_37, decode_37_simd);
