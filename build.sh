@@ -17,14 +17,15 @@ clang++ -fsanitize=address -fsanitize=undefined simdutf.o digest.test.o -o test
 ./test
 ./a.out
 
-funcs=encode_40_simd,decode_40_simd,encode_37,decode_37,encode_37_simd,decode_37_simd,decode_37_simd_mullo
-llvm-objdump -Mintel --disassemble-symbols=$funcs > dis
-
-rm -f mca
-for func in ${funcs//,/ }; do
-    (echo -e ".intel_syntax\n# LLVM-MCA-BEGIN $func\n";\
-        llvm-objdump -Mintel --no-show-raw-insn --disassemble-symbols=$func --no-leading-addr a.out | tail -n+7;\
-        echo "# LLVM-MCA-END") \
-        | llvm-mca -mcpu=native 2>/dev/null >> mca
-    echo '============================================' >> mca
-done
+# funcs=encode_40_simd,decode_40_simd,encode_37,decode_37,encode_37_simd,decode_37_simd,decode_37_simd_mullo,encode_40_alt,decode_40_alt,encode_40_alt_simd,decode_40_alt_simd
+# funcs=encode_40_alt,decode_40_alt,encode_40_alt_simd,decode_40_alt_simd
+# llvm-objdump -Mintel --disassemble-symbols=$funcs > dis
+#
+# rm -f mca
+# for func in ${funcs//,/ }; do
+#     (echo -e ".intel_syntax\n# LLVM-MCA-BEGIN $func\n";\
+#         llvm-objdump -Mintel --no-show-raw-insn --disassemble-symbols=$func --no-leading-addr a.out | tail -n+7;\
+#         echo "# LLVM-MCA-END") \
+#         | llvm-mca -mcpu=native 2>/dev/null >> mca
+#     echo '============================================' >> mca
+# done

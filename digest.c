@@ -31,10 +31,16 @@ void printbits_32(uint32_t x) {
 
 void printbits_64(uint64_t x) {
     for (int i = 0; i < 64; i++) {
-        if ((x >> (64 - i)) & 1) {
+        if ((x >> (63 - i)) & 1) {
             printf("1");
         } else {
             printf("0");
+        }
+        if ((i + 1) % 4 == 0 && (i + 1) % 8 != 0) {
+            printf("_");
+        }
+        if ((i + 1) % 8 == 0) {
+            printf(" ");
         }
     }
     printf("\n");
@@ -372,6 +378,47 @@ void NOINLINE decode_40_alt(const char x[40], char ret[32]) {
     }
 }
 
+void NOINLINE encode_40_alt_simd(const char x[32], char ret[40]) {
+    __m256i y = _mm256_loadu_si256((__m256i*) x);
+
+    const __m256i shifts = _mm256_set_epi64x(4, 5, 6, 7); // maybe use a cvtepu8_epi64?
+                                                          //
+    __m256i z = _mm256_srlv_epi64(_mm256_and_si256(y, _mm256_set1_epi64x(0x8080808080808080)), shifts);
+    // or reduce the 4 u64
+    // clang chooses to do 1 shuf then an extractf128 and or
+    // 3 2   1 0
+    // d c | b a
+    // c d | a b
+    z = _mm256_or_si256(z, _mm256_permute4x64_epi64(z, 0b10110001));
+    // dc dc | ba ba
+    // ba ba | dc dc
+    z = _mm256_or_si256(z, _mm256_permute4x64_epi64(z, 0b00001010));
+
+    y = _mm256_or_si256(y, _mm256_set1_epi64x(0x8080808080808080));
+    _mm256_storeu_si256((__m256i*)ret, y);
+
+    uint64_t bits = _mm256_extract_epi64(z, 0);
+    bits |= 0x8080808080808080;
+    memcpy(ret + 32, &bits, 8);
+}
+
+void NOINLINE decode_40_alt_simd(const char x[40], char ret[32]) {
+    __m256i y = _mm256_loadu_si256((__m256i*) x);
+
+    uint64_t bits;
+    memcpy(&bits, x + 32, 8);
+    __m256i vbits = _mm256_set1_epi64x(bits);
+
+    const __m256i shifts = _mm256_set_epi64x(4, 5, 6, 7); // maybe use a cvtepu8_epi64?
+    vbits = _mm256_sllv_epi64(vbits, shifts);
+    vbits = _mm256_and_si256(vbits, _mm256_set1_epi64x(0x8080808080808080));
+
+    y = _mm256_and_si256(y, _mm256_set1_epi64x(0x7f7f7f7f7f7f7f7f));
+    y = _mm256_or_si256(y, vbits);
+
+    _mm256_storeu_si256((__m256i*)ret, y);
+}
+
 // a utf-8 2 byte sequence is 110xxxxx 10xxxxxx
 // this is 11 bits, so a 256 bit digest needs 24 pairs == 48 bytes
 // a 3 byte sequence is 110xxxxx 10xxxxxx 10xxxxxx
@@ -568,6 +615,11 @@ int main(int argc, char **argv) {
     CASE(40, encode_40_be, decode_40_be);
     CASE(40, encode_40_simd, decode_40_simd);
     CASE(40, encode_40_alt, decode_40_alt);
+    CASE(40, encode_40_alt_simd, decode_40_alt_simd);
+    // check interop
+    CASE(40, encode_40_alt_simd, decode_40_alt);
+    CASE(40, encode_40_alt, decode_40_alt_simd);
+
     CASE(37, encode_37, decode_37);
     CASE(37, encode_37_simd, decode_37_simd);
     CASE(37, encode_37_simd, decode_37_simd_mullo);
@@ -625,6 +677,8 @@ int main(int argc, char **argv) {
     BENCH(encode_40_be, decode_40_be);
     BENCH(encode_40_simd, decode_40_simd);
     BENCH(encode_40_alt, decode_40_alt);
+    BENCH(encode_40_alt_simd, decode_40_alt_simd);
+
     BENCH(encode_37, decode_37);
     BENCH(encode_37_simd, decode_37_simd);
     /*BENCH(encode_48_utf8, decode_48_utf8);*/
