@@ -210,6 +210,9 @@ void NOINLINE decode_40_simd(const char x[40], char ret[32]) {
 // low mem -> high mem
 // encode_37:      1ddd_dddd 1ccc_cccd 1bbb_bbcc 1aaa_abbb 1xxx_aaaa
 // encode_37_simd: 1aaa_aaaa 1bbb_bbba 1ccc_ccbb 1ddd_dccc 1xxx_dddd
+// so to be compatible one of them needs a __builtin_bswap32 on bits
+// I see no perf difference with the bswap
+#define ENCODE_37_BSWAP
 
 void NOINLINE encode_37(const char x[32], char ret[37]) {
     uint32_t bits = 0;
@@ -224,6 +227,9 @@ void NOINLINE encode_37(const char x[32], char ret[37]) {
         a |= 0x8080808080808080;
         memcpy(ret + i * 8, &a, 8);
     }
+#ifdef ENCODE_37_BSWAP
+    bits = __builtin_bswap32(bits);
+#endif
     // for 64 bit a, b, c, d
     // bits = aaaa_aaaa bbbb_bbbb cccc_cccc dddd_dddd
     // put 28 bits into the low 7 bits of each byte
@@ -242,6 +248,9 @@ void NOINLINE decode_37(const char x[37], char ret[32]) {
     memcpy(&b, x + 32, 4);
     memcpy(&c, x + 36, 1);
     uint32_t bits = _pext_u32(b, 0x7f7f7f7f) | (uint32_t)c << 28;
+#ifdef ENCODE_37_BSWAP
+    bits = __builtin_bswap32(bits);
+#endif
     for (int i = 3; i >= 0; i--) {
         uint64_t a;
         memcpy(&a, x + i * 8, 8);
@@ -282,8 +291,7 @@ void NOINLINE decode_37_simd(const char x[37], char ret[32]) {
 
     // expand_mask puts 0xff in each byte where the bit is 1
     // so mask off the lower 7 to just get the high bit
-    /*__m256i msb = _mm256_and_si256(expand_mask(bits), _mm256_set1_epi8(0x80));*/
-    __m256i msb = _mm256_and_si256(expand_mask(bits), _mm256_set1_epi64x(0x8080808080808080));
+    __m256i msb = _mm256_and_si256(expand_mask(bits), _mm256_set1_epi8(0x80));
 
     y = _mm256_or_si256(
             /*_mm256_and_si256(y, _mm256_set1_epi8(0x7f)),*/
@@ -319,8 +327,7 @@ void NOINLINE decode_37_simd_mullo(const char x[37], char ret[32]) {
     const __m256i shuffle = _mm256_setr_epi64x(0x0000000000000000, 0x0101010101010101, 0x0202020202020202, 0x0303030303030303);
     vbits = _mm256_shuffle_epi8(vbits, shuffle);
     const __m256i shift = _mm256_set1_epi64x(0x0102040810204080);
-    /*__m256i msb = _mm256_and_si256(_mm256_mullo_epi16(vbits, shift), _mm256_set1_epi8(0x80));*/
-    __m256i msb = _mm256_and_si256(_mm256_mullo_epi16(vbits, shift), _mm256_set1_epi64x(0x8080808080808080));
+    __m256i msb = _mm256_and_si256(_mm256_mullo_epi16(vbits, shift), _mm256_set1_epi8(0x80));
 
     y = _mm256_or_si256(
             /*_mm256_and_si256(y, _mm256_set1_epi8(0x7f)),*/
@@ -328,6 +335,96 @@ void NOINLINE decode_37_simd_mullo(const char x[37], char ret[32]) {
             msb
             );
     _mm256_storeu_si256((__m256i*) ret, y);
+}
+
+// this version grabs the msb of each 64 bit
+// x = a b c d e f g h, i j k l m n o p, ...
+// the first 64 bit value hgfedcba
+// grab the msb h000_0000 g000_0000 f000_0000 e000_0000 d000_0000 c000_0000 b000_0000 a000_0000
+// shift by 7           h         g         f         e         d         c         b         a  # puts to lsb
+// next by 6           p         o         n         m         l         k         j         i
+// etc. so that each low nibble gets the bits
+// set the msb of these 8 bytes so that it can't be '\0' or '/'
+// no simd or pdep/pext required
+void NOINLINE encode_40_alt(const char x[32], char ret[40]) {
+    uint64_t bits = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t a;
+        memcpy(&a, x + i * 8, 8);
+        uint64_t msb = a & 0x8080808080808080;
+        bits |= msb >> (7 - i);
+        a |= 0x8080808080808080;
+        memcpy(ret + i * 8, &a, 8);
+    }
+    bits |= 0x8080808080808080;
+    memcpy(ret + 32, &bits, 8);
+}
+
+void NOINLINE decode_40_alt(const char x[40], char ret[32]) {
+    uint64_t bits;
+    memcpy(&bits, x + 32, 8);
+    for (int i = 0; i < 4; i++) {
+        uint64_t a;
+        memcpy(&a, x + i * 8, 8);
+        uint64_t msb = (bits << (7 - i)) & 0x8080808080808080;
+        a = (a & 0x7f7f7f7f7f7f7f7f) | msb;
+        memcpy(ret + i * 8, &a, 8);
+    }
+}
+
+// a utf-8 2 byte sequence is 110xxxxx 10xxxxxx
+// this is 11 bits, so a 256 bit digest needs 24 pairs == 48 bytes
+// a 3 byte sequence is 110xxxxx 10xxxxxx 10xxxxxx
+// this is 17 bits, need 16 triples == 48 bytes
+// a 3 byte sequence is 110xxxxx 10xxxxxx 10xxxxxx 10xxxxxx
+// this is 23 bits, need 4 quads == 48 bytes
+// they all use the same number of bytes
+// the 17 bit sequence is appealing because if we only use 16 of those bits, we fit perfectly in 16 triples
+// and 16 is a nicer number than any of the others
+// does require pdep/pext
+// boo I don't think this works because of overlong sequence, if a character can be encoded in less than the 3 bytes then it must be
+void NOINLINE encode_48_utf8(const char x[32], char ret[48]) {
+    // we transform 64 bits into 4 triples == 12 bytes
+    //      0       1       2        3        4         5       6        7
+    // 110xxxxx 10xxxxxx 10xxxxxx 110xxxxx 10xxxxxx 10xxxxxx 110xxxxx 10xxxxxx # this has 45 bits
+    //      8       9       a        b
+    // 10xxxxxx 110xxxxx 10xxxxxx 10xxxxxx  # this has 23 bits, only need 19 bits
+    //
+    // 0x3f gives the dep mask for 10xx_xxxx == 0011_1111
+    // 0x1f gives the dep mask for 110x_xxxx == 0001_1111
+    // 0x80 gives the bits for 10xx_xxxx
+    // 0xc0 gives the bits for 110x_xxxx
+    // written in reverse
+    // in byte order:
+    const uint64_t bits8 = 0x80c08080c08080c0;
+    const uint32_t bits4 = 0x8080c080;
+    const uint64_t dep_mask8 = 0x3f1f3f3f1f3f3f1f;
+    const uint32_t dep_mask4 = 0x3f3f1f3f;
+    assert(__builtin_popcountll(dep_mask8) == 45);
+    assert(__builtin_popcountll(dep_mask4) == 23);
+    for (int i = 0; i < 4; i++) {
+        uint64_t a;
+        memcpy(&a, x + i * 8, 8);
+        uint64_t o = _pdep_u64(a, dep_mask8) | bits8;
+        uint32_t p = _pdep_u32(a >> 45, dep_mask4) | bits4;
+        memcpy(ret, &o, 8);
+        memcpy(ret + 8, &p, 4);
+        ret += 12;
+    }
+}
+
+void NOINLINE decode_48_utf8(const char x[48], char ret[32]) {
+    const uint64_t dep_mask8 = 0x3f1f3f3f1f3f3f1f;
+    const uint32_t dep_mask4 = 0x3f3f1f3f;
+    for (int i = 0; i < 4; i++) {
+        uint64_t o, a;
+        uint32_t p;
+        memcpy(&o, x, 8);
+        memcpy(&p, x + 8, 4);
+        x += 12;
+        a = _pext_u64(o, dep_mask8) | (uint64_t)_pext_u32(p, dep_mask4) << 45;
+        memcpy(ret + i * 8, &a, 8);
+    }
 }
 
 // -- following section of code adapted from https://github.com/zbjornson/fast-hex/blob/master/src/hex.cc under MIT
@@ -441,7 +538,7 @@ int check(char x[32], char* y, size_t n, char z[32]) {
 
 int main(int argc, char **argv) {
     char x[32], xx[32];
-    char y[40];
+    char y[48];
     char z[65];
 
     memset(x, 1, 32);
@@ -470,9 +567,17 @@ int main(int argc, char **argv) {
     CASE(40, encode_40_le, decode_40_le);
     CASE(40, encode_40_be, decode_40_be);
     CASE(40, encode_40_simd, decode_40_simd);
+    CASE(40, encode_40_alt, decode_40_alt);
     CASE(37, encode_37, decode_37);
     CASE(37, encode_37_simd, decode_37_simd);
     CASE(37, encode_37_simd, decode_37_simd_mullo);
+    // check interop between the simd version and not
+    CASE(37, encode_37, decode_37_simd);
+    CASE(37, encode_37_simd, decode_37);
+
+    /*CASE(48, encode_48_utf8, decode_48_utf8);*/
+    // the utf8 is not valid :(
+    /*assert(simdutf_validate_utf8(y, 48));*/
 
     char test[32];
     for (int i = 0; i < 32; i++) {test[i] = i;}
@@ -519,8 +624,10 @@ int main(int argc, char **argv) {
     BENCH(encode_40_le, decode_40_le);
     BENCH(encode_40_be, decode_40_be);
     BENCH(encode_40_simd, decode_40_simd);
+    BENCH(encode_40_alt, decode_40_alt);
     BENCH(encode_37, decode_37);
     BENCH(encode_37_simd, decode_37_simd);
+    /*BENCH(encode_48_utf8, decode_48_utf8);*/
 
     acc = 0;
     clock_ns(&start);
