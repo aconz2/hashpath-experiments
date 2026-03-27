@@ -18,6 +18,22 @@ static uint64_t elapsed_ns(Timespec start, Timespec stop) {
   return (uint64_t)(stop.tv_sec - start.tv_sec) * 1000000000LL + (uint64_t)(stop.tv_nsec - start.tv_nsec);
 }
 
+/*#define ANDN*/
+/*#define FORCE_ANDN*/
+
+// interestingly _mm256_andnot_si256 doesn't generate vpandn
+// in immintrin.h it looks like
+// return (__m256i)(~(__v4du)__a & (__v4du)__b);
+static inline __m256i force_vpandn(__m256i a, __m256i b) {
+    __m256i result;
+    __asm__ volatile (
+        "vpandn %2, %1, %0"
+        : "=v" (result)
+        : "v" (a), "v" (b)
+    );
+    return result;
+}
+
 void printbits_32(uint32_t x) {
     for (int i = 0; i < 32; i++) {
         if ((x >> (31 - i)) & 1) {
@@ -286,9 +302,15 @@ void NOINLINE decode_37_simd(const char x[37], char ret[32]) {
     __m256i msb_mask = _mm256_set1_epi8(0x80);
     __m256i msb = _mm256_and_si256(expand_mask(bits), msb_mask);
 
-    // these two lines are the same but saves a constant load
-    /*y = _mm256_and_si256(y, _mm256_set1_epi8(0x7f));*/
+#ifdef ANDN
+#ifdef FORCE_ANDN
+    y = force_vpandn(msb_mask, y);
+#else
     y = _mm256_andnot_si256(msb_mask, y);
+#endif
+#else
+    y = _mm256_and_si256(y, _mm256_set1_epi8(0x7f));
+#endif
 
     y = _mm256_or_si256(y, msb);
     _mm256_storeu_si256((__m256i*) ret, y);
@@ -469,11 +491,21 @@ void NOINLINE decode_40_alt_simd(const char x[40], char ret[32]) {
     memcpy(&bits, x + 32, 8);
     __m256i vbits = _mm256_set1_epi64x(bits);
 
+    const __m256i msb_mask = _mm256_set1_epi8(0x80);
     const __m256i shifts = _mm256_set_epi64x(4, 5, 6, 7); // maybe use a cvtepu8_epi64?
     vbits = _mm256_sllv_epi64(vbits, shifts);
-    vbits = _mm256_and_si256(vbits, _mm256_set1_epi64x(0x8080808080808080));
+    vbits = _mm256_and_si256(vbits, msb_mask);
 
-    y = _mm256_and_si256(y, _mm256_set1_epi64x(0x7f7f7f7f7f7f7f7f));
+#ifdef ANDN
+#ifdef FORCE_ANDN
+    y = force_vpandn(msb_mask, y);
+#else
+    y = _mm256_andnot_si256(msb_mask, y);
+#endif
+#else
+    y = _mm256_and_si256(y, _mm256_set1_epi8(0x7f));
+#endif
+
     y = _mm256_or_si256(y, vbits);
 
     _mm256_storeu_si256((__m256i*)ret, y);
@@ -795,9 +827,9 @@ int main(int argc, char **argv) {
 
 }
 
-//  ls digest.c | entr -c bash -c './build.sh &&  llvm-objdump --disassemble-symbols=xform_simd,xform_invert_simd -Mintel a.out && ./a.out'
+//  ls digest.c | entr -c bash -c './build.sh &&  llvm-objdump --disassemble-symbols=encode_40_simd,decode_40_simd -Mintel a.out && ./a.out'
 /*
-0000000000401400 <xform_simd>:
+0000000000401400 <encode_40_simd>:
   401400: c5 fe 6f 07                  	vmovdqu	ymm0, ymmword ptr [rdi]
   401404: c5 fd 74 0d 54 1c 00 00      	vpcmpeqb	ymm1, ymm0, ymmword ptr [rip + 0x1c54] # 0x403060 <__dso_handle+0x58>
   40140c: c5 e9 ef d2                  	vpxor	xmm2, xmm2, xmm2
@@ -818,7 +850,7 @@ int main(int argc, char **argv) {
   401458: c3                           	ret
   401459: 0f 1f 80 00 00 00 00         	nop	dword ptr [rax]
 
-0000000000401460 <xform_invert_simd>:
+0000000000401460 <decode_40_simd>:
   401460: 48 8b 47 20                  	mov	rax, qword ptr [rdi + 0x20]
   401464: 48 b9 55 55 55 55 55 55 55 55	movabs	rcx, 0x5555555555555555
   40146e: c4 e2 fa f5 c9               	pext	rcx, rax, rcx

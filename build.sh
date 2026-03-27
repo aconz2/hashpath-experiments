@@ -2,6 +2,8 @@
 
 set -e
 
+CC=${CC:=clang}
+
 if [ ! -f simdutf.cpp ]; then
     wget https://github.com/simdutf/simdutf/releases/download/v8.0.0/singleheader.zip
     unzip singleheader.zip simdutf.cpp simdutf_c.h simdutf.h
@@ -10,8 +12,8 @@ fi
 if [ ! -f simdutf.o ]; then
     clang++ -c -march=native -O2 simdutf.cpp
 fi
-clang -Wall -Werror -c -fsanitize=address -fsanitize=undefined -DTEST -march=native -O2 -o digest.test.o digest.c
-clang -c -DNDEBUG -march=native -O2 -o digest.perf.o digest.c
+$CC -Wall -Wno-unused-function -Werror -c -fsanitize=address -fsanitize=undefined -DTEST -march=native -O2 -o digest.test.o digest.c
+$CC -c -DNDEBUG $@ -march=native -O2 -o digest.perf.o digest.c
 clang++ simdutf.o digest.perf.o -o a.out
 clang++ -fsanitize=address -fsanitize=undefined simdutf.o digest.test.o -o test
 ./test
