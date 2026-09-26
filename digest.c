@@ -653,6 +653,104 @@ void NOINLINE decode_hex(uint8_t* __restrict__ src, const uint8_t* __restrict__ 
     _mm256_storeu_si256(dec256, bytes);
 }
 // -- end fast-hex code
+//
+// -- this code dervived from simdutf
+//
+static __m128i lookup_pshufb_improved128(const __m128i input) {
+  __m128i result = _mm_subs_epu8(input, _mm_set1_epi8(51));
+  result = _mm_sub_epi8(result, _mm_cmpgt_epi8(input, _mm_set1_epi8(25)));
+  __m128i shift_LUT = _mm_setr_epi8(
+          'A', 'a' - 26, '0' - 52, '0' - 52, '0' - 52,
+          '0' - 52, '0' - 52, '0' - 52, '0' - 52, '0' - 52,
+          '0' - 52, '0' - 52, '-' - 62, '_' - 63, 0, 0);
+
+  result = _mm_shuffle_epi8(shift_LUT, result);
+  return _mm_add_epi8(result, input);
+}
+static __m256i lookup_pshufb_improved(const __m256i input) {
+  __m256i result = _mm256_subs_epu8(input, _mm256_set1_epi8(51));
+  result = _mm256_sub_epi8(result, _mm256_cmpgt_epi8(input, _mm256_set1_epi8(25)));
+  __m256i shift_LUT = _mm256_setr_epi8(
+        'A', 'a' - 26, '0' - 52, '0' - 52, '0' - 52, '0' - 52, '0' - 52,
+        '0' - 52, '0' - 52, '0' - 52, '0' - 52, '0' - 52, '-' - 62, '_' - 63, 0,
+        0, 'A', 'a' - 26, '0' - 52, '0' - 52, '0' - 52, '0' - 52, '0' - 52,
+        '0' - 52, '0' - 52, '0' - 52, '0' - 52, '0' - 52, '-' - 62, '_' - 63, 0,
+        0);
+  result = _mm256_shuffle_epi8(shift_LUT, result);
+  return _mm256_add_epi8(result, input);
+}
+static __m256i b64_kernel_mullo(__m256i x) {
+    const __m256i shuf = _mm256_set_epi8(
+        10, 11, 9, 10,  7, 8, 6, 7,  4, 5, 3, 4,  1, 2, 0, 1,
+        10, 11, 9, 10,  7, 8, 6, 7,  4, 5, 3, 4,  1, 2, 0, 1
+    );
+    __m256i y = _mm256_shuffle_epi8(x, shuf);
+    __m256i a = _mm256_and_si256(y, _mm256_set1_epi32(0x003f03f0)); // cl6, al2 bh4
+    __m256i b = _mm256_and_si256(y, _mm256_set1_epi32(0x0fc0fc00)); // bl4 ch2, ah6
+    a = _mm256_mullo_epi16(a, _mm256_set1_epi32(0x01000010)); // << (8, 4)
+    b = _mm256_mulhi_epu16(b, _mm256_set1_epi32(0x04000040)); // >> (6, 10)
+    y = _mm256_or_si256(a, b);
+    return lookup_pshufb_improved(y);
+}
+static __m128i b64_kernel_mullo128(__m128i x) {
+    const __m128i shuf = _mm_set_epi8(
+        10, 11, 9, 10,  7, 8, 6, 7,  4, 5, 3, 4,  1, 2, 0, 1
+    );
+    __m128i y = _mm_shuffle_epi8(x, shuf);
+    __m128i a = _mm_and_si128(y, _mm_set1_epi32(0x003f03f0)); // cl6, al2 bh4
+    __m128i b = _mm_and_si128(y, _mm_set1_epi32(0x0fc0fc00)); // bl4 ch2, ah6
+    a = _mm_mullo_epi16(a, _mm_set1_epi32(0x01000010));
+    b = _mm_mulhi_epu16(b, _mm_set1_epi32(0x04000040));
+    y = _mm_or_si128(a, b);
+    return lookup_pshufb_improved128(y);
+}
+
+void NOINLINE base64_32bytes_only128(const char* src, char* dst) {
+    __m128i x = _mm_loadu_si128((__m128i*)&src[0]);
+    __m128i y = _mm_loadu_si128((__m128i*)&src[12]);
+    __m128i z = _mm_loadu_si128((__m128i*)&src[24]);
+    x = b64_kernel_mullo128(x);
+    y = b64_kernel_mullo128(y);
+    z = b64_kernel_mullo128(z);
+
+    _mm_storeu_si128((__m128i*)&dst[0], x);
+    _mm_storeu_si128((__m128i*)&dst[16], y);
+    _mm_maskstore_epi32((int*)&dst[32], _mm_set_epi32(0, -1, -1, -1), z);
+    dst[43] = '=';
+}
+
+void NOINLINE base64_32bytes(const char* src, char* dst) {
+    __m256i x = _mm256_loadu_si256((__m256i*)&src[0]);
+    __m128i z = _mm_loadu_si128((__m128i*)&src[24]);
+    __m256i group3_shuf = _mm256_set_epi32(
+        5, 5, 4, 3,
+        2, 2, 1, 0
+            );
+    __m256i y = _mm256_permutevar8x32_epi32(x, group3_shuf);
+    x = b64_kernel_mullo(y);
+    z = b64_kernel_mullo128(z);
+
+    _mm256_storeu_si256((__m256i*)&dst[0], x);
+    _mm_maskstore_epi32((int*)&dst[32], _mm_set_epi32(0, -1, -1, -1), z);
+    dst[43] = '=';
+}
+
+// TODO this isn't exactly right
+void NOINLINE base64_32bytes_only256(const char* src, char* dst) {
+    __m256i x = _mm256_loadu_si256((__m256i*)&src[0]);
+    __m256i x2 = x;
+    __m256i group3_shuf = _mm256_set_epi32(
+        5, 5, 4, 3,
+        2, 2, 1, 0
+            );
+    __m256i y = _mm256_permutevar8x32_epi32(x, group3_shuf);
+    x = b64_kernel_mullo(y);
+    x2 = b64_kernel_mullo(x2);
+
+    _mm256_storeu_si256((__m256i*)&dst[0], x);
+    _mm256_maskstore_epi32((int*)&dst[32], _mm256_set_epi32(0, 0, 0, 0, 0, -1, -1, -1), x2);
+    dst[43] = '=';
+}
 
 int check(char x[32], char* y, size_t n, char z[32]) {
     for (size_t i = 0; i < n; i++) {
@@ -786,6 +884,33 @@ int main(int argc, char **argv) {
     BENCH(encode_37_simd, decode_37_simd);
     BENCH(encode_37_simd, decode_37_simd_mullo);
     /*BENCH(encode_48_utf8, decode_48_utf8);*/
+
+    acc = 0;
+    clock_ns(&start);
+    for (int i = 0; i < iters; i++) {
+        base64_32bytes_only128(x, z);
+        acc += z[39];
+    }
+    clock_ns(&stop);
+    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "base64_32bytesonly128", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+
+    acc = 0;
+    clock_ns(&start);
+    for (int i = 0; i < iters; i++) {
+        base64_32bytes(x, z);
+        acc += z[39];
+    }
+    clock_ns(&stop);
+    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "base64_32bytes", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
+
+    acc = 0;
+    clock_ns(&start);
+    for (int i = 0; i < iters; i++) {
+        base64_32bytes_only256(x, z);
+        acc += z[39];
+    }
+    clock_ns(&stop);
+    printf("%20s acc=%lx elapsed=%ld per_iter=%.2f\n", "base64_32bytesonly256", acc, elapsed_ns(start, stop), (double)elapsed_ns(start, stop) / iters);
 
     acc = 0;
     clock_ns(&start);
